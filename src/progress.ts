@@ -30,6 +30,7 @@ function cleanProgressPath(raw: string): string {
 		cleaned = cleaned.slice(1, -1);
 	}
 	if (cleaned.startsWith("@")) cleaned = cleaned.slice(1);
+	cleaned = cleaned.replace(/\\/g, "/");
 	return cleaned;
 }
 
@@ -48,11 +49,11 @@ export function parseApplyPatchInputProgress(input: string): ApplyPatchInputProg
 
 	for (const line of lines) {
 		if (!inPatch) {
-			if (line.trim() === BEGIN) inPatch = true;
+			if (line.includes(BEGIN)) inPatch = true;
 			continue;
 		}
 
-		if (line.trim() === END) {
+		if (line.trim() === END || line.includes(END)) {
 			ended = true;
 			break;
 		}
@@ -90,17 +91,17 @@ export function parseApplyPatchInputProgress(input: string): ApplyPatchInputProg
 			continue;
 		}
 
-		if (line.startsWith(MOVE) && current?.operation === "update") {
-			current.moveTo = cleanProgressPath(line.slice(MOVE.length));
+		const moveMatch = line.match(/^\*\*\* (?:Move to|Move File to|Rename to): (.+)$/i);
+		if (moveMatch && current?.operation === "update") {
+			current.moveTo = cleanProgressPath(moveMatch[1]!);
 			continue;
 		}
 
 		if (!current) continue;
+		if (line.startsWith("@@") || line.startsWith("--- ") || line.startsWith("+++ ")) continue;
 
 		if (current.operation === "add") {
-			if (line.startsWith("+")) {
-				current.added += 1;
-			}
+			current.added += 1;
 			continue;
 		}
 

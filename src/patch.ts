@@ -62,29 +62,28 @@ export interface ApplyPatchResult {
 }
 
 function normalizePatchText(input: string): string[] {
-	return input.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+	let text = input.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+	// Strip markdown code fences if model wrapped the patch in ```...```
+	const beginIdx = text.indexOf("*** Begin Patch");
+	if (beginIdx >= 0) {
+		text = text.slice(beginIdx);
+	}
+	const endIdx = text.indexOf("*** End Patch");
+	if (endIdx >= 0) {
+		text = text.slice(0, endIdx + "*** End Patch".length);
+	}
+	return text.split("\n");
 }
 
 function parseHeader(line: string): { kind: PatchActionKind; path: string } | undefined {
-	const match = line.match(/^\*\*\* (Add|Update|Delete) File: (.+)$/);
+	const match = line.match(/^\*\*\* (Add|Update|Delete|Create|Remove) (?:File:?|to:?)\s*(.+)$/i);
 	if (!match) return undefined;
-	return { kind: match[1]!.toLowerCase() as PatchActionKind, path: match[2]!.trim() };
-}
-
-function ensurePatchLine(action: PatchAction, line: string): void {
-	if (line === "\\ No newline at end of file") return;
-	if (action.kind === "add" && !line.startsWith("+")) {
-		throw new Error(`Add File lines must start with '+': ${action.path}`);
-	}
-	if (action.kind === "delete" && !(line.startsWith("-") || line.startsWith(" "))) {
-		throw new Error(`Delete File lines must start with '-' or space: ${action.path}`);
-	}
-	if (
-		action.kind === "update" &&
-		!(line.startsWith("+") || line.startsWith("-") || line.startsWith(" "))
-	) {
-		throw new Error(`Update File lines must start with '+', '-', or space: ${action.path}`);
-	}
+	let kindRaw = match[1]!.toLowerCase();
+	let kind: PatchActionKind;
+	if (kindRaw === "create" || kindRaw === "add") kind = "add";
+	else if (kindRaw === "delete" || kindRaw === "remove") kind = "delete";
+	else kind = "update";
+	return { kind, path: cleanPatchPath(match[2]!) };
 }
 
 export function parseApplyPatch(input: string): { actions: PatchAction[] } {
@@ -94,14 +93,16 @@ export function parseApplyPatch(input: string): { actions: PatchAction[] } {
 	const lines = normalizePatchText(input);
 	let index = 0;
 	while (index < lines.length && lines[index]!.trim() === "") index++;
-	if (lines[index] !== "*** Begin Patch") throw new Error("Patch must start with '*** Begin Patch'.");
+	if (!lines[index] || !lines[index]!.startsWith("*** Begin Patch")) {
+		throw new Error("Patch must start with '*** Begin Patch'.");
+	}
 	index++;
 
 	const actions: PatchAction[] = [];
 	let sawEnd = false;
 	while (index < lines.length) {
 		const line = lines[index]!;
-		if (line === "*** End Patch") {
+		if (line.trim() === "*** End Patch") {
 			sawEnd = true;
 			break;
 		}
@@ -112,11 +113,20 @@ export function parseApplyPatch(input: string): { actions: PatchAction[] } {
 		index++;
 		while (index < lines.length) {
 			const bodyLine = lines[index]!;
-			if (bodyLine === "*** End Patch" || parseHeader(bodyLine)) break;
-			if (bodyLine.startsWith("*** Move to: ")) {
-				action.moveTo = bodyLine.slice("*** Move to: ".length).trim();
+			if (bodyLine.trim() === "*** End Patch" || parseHeader(bodyLine)) break;
+			if (bodyLine === "*** End of File" || bodyLine.startsWith("*** End of File")) {
+				index++;
+				continue;
+			}
+			const moveMatch = bodyLine.match(/^\*\*\* (?:Move to|Move File to|Rename to): (.+)$/i);
+			if (moveMatch) {
+				action.moveTo = cleanPatchPath(moveMatch[1]!);
 				if (!action.moveTo) throw new Error(`Move target empty for ${action.path}.`);
 				if (action.kind !== "update") throw new Error("Only Update File may include '*** Move to:'.");
+				index++;
+				continue;
+			}
+			if (bodyLine.startsWith("--- ") || bodyLine.startsWith("+++ ")) {
 				index++;
 				continue;
 			}
@@ -126,8 +136,30 @@ export function parseApplyPatch(input: string): { actions: PatchAction[] } {
 				index++;
 				continue;
 			}
-			ensurePatchLine(action, bodyLine);
-			current.lines.push(bodyLine);
+			if (bodyLine === "\\ No newline at end of file") {
+				index++;
+				continue;
+			}
+
+			// Tolerant line normalization for LLMs:
+			if (action.kind === "add") {
+				current.lines.push(bodyLine.startsWith("+") ? bodyLine : `+${bodyLine}`);
+			} else if (action.kind === "update") {
+				if (bodyLine.startsWith("+") || bodyLine.startsWith("-")) {
+					current.lines.push(bodyLine);
+				} else if (bodyLine.startsWith(" ")) {
+					current.lines.push(bodyLine);
+				} else {
+					// Blank line or un-prefixed context line: treat as context
+					current.lines.push(` ${bodyLine}`);
+				}
+			} else if (action.kind === "delete") {
+				if (bodyLine.startsWith("-") || bodyLine.startsWith(" ")) {
+					current.lines.push(bodyLine);
+				} else {
+					current.lines.push(`-${bodyLine}`);
+				}
+			}
 			index++;
 		}
 		if (current.lines.length > 0) action.hunks.push(current);
@@ -136,12 +168,15 @@ export function parseApplyPatch(input: string): { actions: PatchAction[] } {
 		}
 		actions.push(action);
 	}
-	if (!sawEnd) throw new Error("Patch must end with '*** End Patch'.");
+	// If model omitted *** End Patch at EOF, accept it if actions were parsed
+	if (!sawEnd && actions.length === 0) {
+		throw new Error("Patch must end with '*** End Patch'.");
+	}
 	if (actions.length === 0) throw new Error("Patch contains no file actions.");
 	return { actions };
 }
 
-function cleanPatchPath(pathValue: string): string {
+export function cleanPatchPath(pathValue: string): string {
 	let cleaned = pathValue.trim();
 	if (
 		(cleaned.startsWith('"') && cleaned.endsWith('"')) ||
@@ -150,6 +185,7 @@ function cleanPatchPath(pathValue: string): string {
 		cleaned = cleaned.slice(1, -1);
 	}
 	if (cleaned.startsWith("@")) cleaned = cleaned.slice(1);
+	cleaned = cleaned.replace(/\\/g, "/");
 	return cleaned;
 }
 
@@ -212,7 +248,45 @@ function replaceOnce(content: string, oldText: string, newText: string, path: st
 		const next = replaceUnique(content, candidateOld, candidateNew, path);
 		if (next !== undefined) return next;
 	}
+
+	// Fuzzy fallback: line-by-line matching with trailing whitespace tolerance
+	const fuzzy = replaceFuzzyLines(content, oldText, newText);
+	if (fuzzy !== undefined) return fuzzy;
+
 	throw new Error(`Patch context not found in ${path}`);
+}
+
+function replaceFuzzyLines(content: string, oldText: string, newText: string): string | undefined {
+	const contentLines = content.split("\n");
+	const oldLines = oldText.split("\n");
+	const newLines = newText.split("\n");
+
+	if (oldLines.length === 0) return undefined;
+
+	const normContent = contentLines.map((l) => l.trimEnd());
+	const normOld = oldLines.map((l) => l.trimEnd());
+
+	const matchIndices: number[] = [];
+	for (let i = 0; i <= normContent.length - normOld.length; i++) {
+		let match = true;
+		for (let j = 0; j < normOld.length; j++) {
+			if (normContent[i + j] !== normOld[j]) {
+				match = false;
+				break;
+			}
+		}
+		if (match) {
+			matchIndices.push(i);
+		}
+	}
+
+	if (matchIndices.length === 1) {
+		const matchIndex = matchIndices[0]!;
+		contentLines.splice(matchIndex, oldLines.length, ...newLines);
+		return contentLines.join("\n");
+	}
+
+	return undefined;
 }
 
 interface FileSnapshot {

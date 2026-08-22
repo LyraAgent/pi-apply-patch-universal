@@ -150,4 +150,74 @@ describe("applyPatch execution with diff line numbers", () => {
 		// f2 should be cleaned up / rolled back
 		await assert.rejects(async () => await readFile(path.join(cwd, "f2.ts"), "utf8"));
 	});
+
+	it("tolerates blank lines without leading space and un-prefixed context lines in update", async () => {
+		const cwd = await makeTempDir();
+		await writeFile(
+			path.join(cwd, "model.ts"),
+			"export interface User {\n\tname: string;\n\n\tage: number;\n}\n",
+			"utf8",
+		);
+
+		// Notice the completely empty line \n\n without leading space, and un-prefixed context line
+		const patchText = `*** Begin Patch
+*** Update File: model.ts
+@@
+export interface User {
+\tname: string;
+
+-\tage: number;
++\tage: number;
++\temail: string;
+}
+*** End Patch`;
+
+		const result = await applyPatch(patchText, { cwd });
+		assert.equal(result.filesChanged, 1);
+		const updated = await readFile(path.join(cwd, "model.ts"), "utf8");
+		assert.equal(
+			updated,
+			"export interface User {\n\tname: string;\n\n\tage: number;\n\temail: string;\n}\n",
+		);
+	});
+
+	it("tolerates markdown code fences wrapping the patch", async () => {
+		const cwd = await makeTempDir();
+		await writeFile(path.join(cwd, "test.txt"), "hello world\n", "utf8");
+
+		const patchText = `Here is the patch you requested:
+\`\`\`patch
+*** Begin Patch
+*** Update File: test.txt
+@@
+-hello world
++hello universe
+*** End Patch
+\`\`\`
+Done!`;
+
+		const result = await applyPatch(patchText, { cwd });
+		assert.equal(result.filesChanged, 1);
+		assert.equal(await readFile(path.join(cwd, "test.txt"), "utf8"), "hello universe\n");
+	});
+
+	it("tolerates add file with blank lines without + prefix", async () => {
+		const cwd = await makeTempDir();
+
+		const patchText = `*** Begin Patch
+*** Add File: created.ts
++function fn1() {
++\treturn 1;
++}
+
++function fn2() {
++\treturn 2;
++}
+*** End Patch`;
+
+		const result = await applyPatch(patchText, { cwd });
+		assert.equal(result.filesChanged, 1);
+		const content = await readFile(path.join(cwd, "created.ts"), "utf8");
+		assert.equal(content, "function fn1() {\n\treturn 1;\n}\n\nfunction fn2() {\n\treturn 2;\n}");
+	});
 });
