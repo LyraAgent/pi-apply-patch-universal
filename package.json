@@ -1,0 +1,35 @@
+{
+  "name": "pi-apply-patch-universal",
+  "version": "0.1.0",
+  "description": "Universal, configurable Codex-style apply_patch extension for Pi \u2014 works seamlessly with Claude, Gemini, DeepSeek, GPT, and custom API relays.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "apply_patch",
+    "codex",
+    "diff",
+    "universal"
+  ],
+  "author": "LyraAgent",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LyraAgent/pi-apply-patch-universal.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LyraAgent/pi-apply-patch-universal/issues"
+  },
+  "homepage": "https://github.com/LyraAgent/pi-apply-patch-universal#readme",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80.0",
+    "typebox": ">=0.34.0"
+  }
+}
