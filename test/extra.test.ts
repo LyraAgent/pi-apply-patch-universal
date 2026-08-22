@@ -199,4 +199,155 @@ describe("advanced patch resilience & diagnostics", () => {
 		assert.ok(errorCaught.message.includes("Closest match in file"));
 		assert.ok(errorCaught.message.includes("<-- mismatch"));
 	});
+
+	it("enforces path sandbox and blocks escaping cwd by default", async () => {
+		const cwd = await makeTempDir();
+		const outsideDir = await makeTempDir();
+		await writeFile(path.join(outsideDir, "secret.txt"), "secret data\n", "utf8");
+
+		const relOutside = path.relative(cwd, path.join(outsideDir, "secret.txt")).replace(/\\/g, "/");
+		const patchText = [
+			"*** Begin Patch",
+			`*** Update File: ${relOutside}`,
+			"@@",
+			"-secret data",
+			"+hacked data",
+			"*** End " + "Patch",
+		].join("\n");
+
+		// By default (allowAbsolutePaths: false), path escapes must throw
+		await assert.rejects(
+			async () => await applyPatch(patchText, { cwd, allowAbsolutePaths: false }),
+			/Patch path escapes cwd/,
+		);
+
+		// When allowAbsolutePaths: true, cross-directory patch is allowed
+		const result = await applyPatch(patchText, { cwd, allowAbsolutePaths: true });
+		assert.equal(result.filesChanged, 1);
+		assert.equal(await readFile(path.join(outsideDir, "secret.txt"), "utf8"), "hacked data\n");
+	});
+
+	it("rolls back Move (Rename) operations when a subsequent file in the patch fails", async () => {
+		const cwd = await makeTempDir();
+		await writeFile(path.join(cwd, "old_name.ts"), "export const a = 1;\n", "utf8");
+		await writeFile(path.join(cwd, "second.ts"), "const b = 2;\n", "utf8");
+
+		const patchText = [
+			"*** Begin Patch",
+			"*** Update File: old_name.ts",
+			"*** Move to: new_name.ts",
+			"@@",
+			"-export const a = 1;",
+			"+export const a = 100;",
+			"*** Update File: second.ts",
+			"@@",
+			"-non_existent_context_to_trigger_failure",
+			"+anything",
+			"*** End " + "Patch",
+		].join("\n");
+
+		await assert.rejects(
+			async () => await applyPatch(patchText, { cwd }),
+			/Patch context not found/,
+		);
+
+		// old_name.ts should still exist at original path with original content
+		assert.equal(await readFile(path.join(cwd, "old_name.ts"), "utf8"), "export const a = 1;\n");
+		// new_name.ts should NOT exist
+		await assert.rejects(async () => await readFile(path.join(cwd, "new_name.ts"), "utf8"));
+	});
+
+	it("rolls back Delete operations when a subsequent file in the patch fails", async () => {
+		const cwd = await makeTempDir();
+		await writeFile(path.join(cwd, "to_delete.txt"), "important data\n", "utf8");
+		await writeFile(path.join(cwd, "other.txt"), "other data\n", "utf8");
+
+		const patchText = [
+			"*** Begin Patch",
+			"*** Delete File: to_delete.txt",
+			"*** Update File: other.txt",
+			"@@",
+			"-invalid context line",
+			"+replacement",
+			"*** End " + "Patch",
+		].join("\n");
+
+		await assert.rejects(
+			async () => await applyPatch(patchText, { cwd }),
+			/Patch context not found/,
+		);
+
+		// to_delete.txt must be restored with original content
+		assert.equal(await readFile(path.join(cwd, "to_delete.txt"), "utf8"), "important data\n");
+	});
+
+	it("handles pure insertion hunk and pure deletion hunk", async () => {
+		const cwd = await makeTempDir();
+		const original = "line1\nline2\nline3\n";
+		await writeFile(path.join(cwd, "insert_delete.txt"), original, "utf8");
+
+		const patchText = [
+			"*** Begin Patch",
+			"*** Update File: insert_delete.txt",
+			"@@",
+			" line1",
+			"+line1.5 inserted",
+			" line2",
+			"-line3",
+			"*** End " + "Patch",
+		].join("\n");
+
+		const result = await applyPatch(patchText, { cwd });
+		assert.equal(result.filesChanged, 1);
+		const updated = await readFile(path.join(cwd, "insert_delete.txt"), "utf8");
+		assert.equal(updated, "line1\nline1.5 inserted\nline2\n");
+	});
+
+	it("handles replacement at file start (line 1) and file end (last line)", async () => {
+		const cwd = await makeTempDir();
+		const original = "FIRST_LINE\nmiddle\nLAST_LINE\n";
+		await writeFile(path.join(cwd, "boundary.txt"), original, "utf8");
+
+		const patchText = [
+			"*** Begin Patch",
+			"*** Update File: boundary.txt",
+			"@@",
+			"-FIRST_LINE",
+			"+NEW_FIRST_LINE",
+			" middle",
+			"-LAST_LINE",
+			"+NEW_LAST_LINE",
+			"*** End " + "Patch",
+		].join("\n");
+
+		const result = await applyPatch(patchText, { cwd });
+		assert.equal(result.filesChanged, 1);
+		const updated = await readFile(path.join(cwd, "boundary.txt"), "utf8");
+		assert.equal(updated, "NEW_FIRST_LINE\nmiddle\nNEW_LAST_LINE\n");
+	});
+
+	it("handles 100% full file content rewrite via patch", async () => {
+		const cwd = await makeTempDir();
+		const original = "old A\nold B\nold C\n";
+		await writeFile(path.join(cwd, "full.txt"), original, "utf8");
+
+		const patchText = [
+			"*** Begin Patch",
+			"*** Update File: full.txt",
+			"@@",
+			"-old A",
+			"-old B",
+			"-old C",
+			"+new A",
+			"+new B",
+			"+new C",
+			"+new D",
+			"*** End " + "Patch",
+		].join("\n");
+
+		const result = await applyPatch(patchText, { cwd });
+		assert.equal(result.filesChanged, 1);
+		const updated = await readFile(path.join(cwd, "full.txt"), "utf8");
+		assert.equal(updated, "new A\nnew B\nnew C\nnew D\n");
+	});
 });
