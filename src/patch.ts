@@ -24,6 +24,43 @@ export interface ApplyPatchOptions {
 	allowAbsolutePaths?: boolean;
 }
 
+export interface ApplyPatchFileDiff {
+	path: string;
+	moveTo?: string;
+	operation: PatchActionKind;
+	added: number;
+	removed: number;
+	diff: string;
+	firstChangedLine?: number;
+}
+
+export interface ApplyPatchProgressFile {
+	path: string;
+	moveTo?: string;
+	operation: PatchActionKind;
+	added: number;
+	removed: number;
+	done: boolean;
+}
+
+export interface ApplyPatchProgress {
+	stage: "apply_progress";
+	totalOperations: number;
+	completedOperations: number;
+	currentFile?: string;
+	files: ApplyPatchProgressFile[];
+	fileDiffs: ApplyPatchFileDiff[];
+	diff: string;
+}
+
+export interface ApplyPatchResult {
+	files: string[];
+	summary: string;
+	filesChanged: number;
+	fileDiffs: ApplyPatchFileDiff[];
+	diff: string;
+}
+
 function normalizePatchText(input: string): string[] {
 	return input.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
 }
@@ -210,12 +247,151 @@ function actionSummary(action: PatchAction): string {
 	return `update ${action.path}`;
 }
 
+function operationCode(kind: PatchActionKind): "A" | "D" | "U" {
+	if (kind === "add") return "A";
+	if (kind === "delete") return "D";
+	return "U";
+}
+
+function countContentLines(content: string): number {
+	if (content.length === 0) return 0;
+	const lines = content.split("\n");
+	return content.endsWith("\n") ? lines.length - 1 : lines.length;
+}
+
+export function generateNumberedDiff(
+	oldContent: string,
+	newContent: string,
+	contextLines = 4,
+): { diff: string; firstChangedLine: number | undefined } {
+	const oldLines = oldContent.length === 0 ? [] : oldContent.split("\n");
+	const newLines = newContent.length === 0 ? [] : newContent.split("\n");
+	const lineNumWidth = String(Math.max(oldLines.length, newLines.length, 1)).length;
+
+	type Segment = { type: "equal" | "add" | "remove"; lines: string[] };
+	const lcs = Array.from({ length: oldLines.length + 1 }, () => Array<number>(newLines.length + 1).fill(0));
+	for (let i = oldLines.length - 1; i >= 0; i -= 1) {
+		for (let j = newLines.length - 1; j >= 0; j -= 1) {
+			if (oldLines[i] === newLines[j]) lcs[i][j] = lcs[i + 1][j + 1] + 1;
+			else lcs[i][j] = Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+		}
+	}
+
+	const segments: Segment[] = [];
+	let i = 0;
+	let j = 0;
+	const push = (type: Segment["type"], line: string) => {
+		const last = segments[segments.length - 1];
+		if (last && last.type === type) last.lines.push(line);
+		else segments.push({ type, lines: [line] });
+	};
+
+	while (i < oldLines.length && j < newLines.length) {
+		if (oldLines[i] === newLines[j]) {
+			push("equal", oldLines[i]!);
+			i += 1;
+			j += 1;
+		} else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+			push("remove", oldLines[i]!);
+			i += 1;
+		} else {
+			push("add", newLines[j]!);
+			j += 1;
+		}
+	}
+	while (i < oldLines.length) {
+		push("remove", oldLines[i]!);
+		i += 1;
+	}
+	while (j < newLines.length) {
+		push("add", newLines[j]!);
+		j += 1;
+	}
+
+	const output: string[] = [];
+	let oldLineNum = 1;
+	let newLineNum = 1;
+	let firstChangedLine: number | undefined;
+	let lastWasChange = false;
+
+	for (let index = 0; index < segments.length; index += 1) {
+		const segment = segments[index]!;
+		if (segment.type === "add" || segment.type === "remove") {
+			if (firstChangedLine === undefined) firstChangedLine = newLineNum;
+			for (const line of segment.lines) {
+				if (segment.type === "add") {
+					output.push(`+${String(newLineNum).padStart(lineNumWidth, " ")} ${line}`);
+					newLineNum += 1;
+				} else {
+					output.push(`-${String(oldLineNum).padStart(lineNumWidth, " ")} ${line}`);
+					oldLineNum += 1;
+				}
+			}
+			lastWasChange = true;
+			continue;
+		}
+
+		const nextIsChange =
+			index < segments.length - 1 &&
+			(segments[index + 1]!.type === "add" || segments[index + 1]!.type === "remove");
+		if (lastWasChange || nextIsChange) {
+			let linesToShow = segment.lines;
+			let skipStart = 0;
+			let skipEnd = 0;
+
+			if (!lastWasChange) {
+				skipStart = Math.max(0, linesToShow.length - contextLines);
+				linesToShow = linesToShow.slice(skipStart);
+			}
+			if (!nextIsChange && linesToShow.length > contextLines) {
+				skipEnd = linesToShow.length - contextLines;
+				linesToShow = linesToShow.slice(0, contextLines);
+			}
+
+			if (skipStart > 0) {
+				output.push(` ${"".padStart(lineNumWidth, " ")} ...`);
+				oldLineNum += skipStart;
+				newLineNum += skipStart;
+			}
+			for (const line of linesToShow) {
+				output.push(` ${String(oldLineNum).padStart(lineNumWidth, " ")} ${line}`);
+				oldLineNum += 1;
+				newLineNum += 1;
+			}
+			if (skipEnd > 0) {
+				output.push(` ${"".padStart(lineNumWidth, " ")} ...`);
+				oldLineNum += skipEnd;
+				newLineNum += skipEnd;
+			}
+		} else {
+			oldLineNum += segment.lines.length;
+			newLineNum += segment.lines.length;
+		}
+
+		lastWasChange = false;
+	}
+
+	return { diff: output.join("\n"), firstChangedLine };
+}
+
+export function combineFileDiffs(fileDiffs: ApplyPatchFileDiff[]): string {
+	return fileDiffs
+		.map((fileDiff) => {
+			const target = fileDiff.moveTo ? `${fileDiff.path} -> ${fileDiff.moveTo}` : fileDiff.path;
+			const header = `@@ +${fileDiff.added} -${fileDiff.removed} ${operationCode(fileDiff.operation)} ${target}`;
+			return [header, fileDiff.diff].filter(Boolean).join("\n");
+		})
+		.join("\n\n");
+}
+
 export async function applyPatch(
 	input: string,
 	options: ApplyPatchOptions,
-): Promise<{ files: string[]; summary: string }> {
+	onProgress?: (progress: ApplyPatchProgress) => void,
+): Promise<ApplyPatchResult> {
 	const parsed = parseApplyPatch(input);
 	const files: string[] = [];
+	const fileDiffs: ApplyPatchFileDiff[] = [];
 	const snapshots = new Map<string, FileSnapshot>();
 
 	const snap = async (pathValue: string) => {
@@ -223,28 +399,86 @@ export async function applyPatch(
 		if (!snapshots.has(absolutePath)) snapshots.set(absolutePath, await snapshotPath(absolutePath));
 	};
 
+	const progressFiles: ApplyPatchProgressFile[] = parsed.actions.map((act) => ({
+		path: act.path,
+		moveTo: act.moveTo,
+		operation: act.kind,
+		added: 0,
+		removed: 0,
+		done: false,
+	}));
+
+	const emitProgress = (completedOperations: number, currentFileIndex?: number) => {
+		onProgress?.({
+			stage: "apply_progress",
+			totalOperations: parsed.actions.length,
+			completedOperations,
+			currentFile: currentFileIndex !== undefined ? progressFiles[currentFileIndex]?.path : undefined,
+			files: progressFiles.map((f) => ({ ...f })),
+			fileDiffs: [...fileDiffs],
+			diff: combineFileDiffs(fileDiffs),
+		});
+	};
+
+	if (parsed.actions.length > 0) {
+		emitProgress(0, 0);
+	}
+
 	try {
-		for (const action of parsed.actions) {
+		for (const [opIndex, action] of parsed.actions.entries()) {
+			const progressFile = progressFiles[opIndex]!;
 			await snap(action.path);
 			if (action.moveTo) await snap(action.moveTo);
 
 			if (action.kind === "add") {
 				const absolutePath = resolvePatchPath(action.path, options);
+				const newContent = addText(action);
 				await mkdir(dirname(absolutePath), { recursive: true });
-				await writeFile(absolutePath, addText(action), "utf8");
+				await writeFile(absolutePath, newContent, "utf8");
 				files.push(action.path);
+				const added = action.hunks.reduce(
+					(sum, h) => sum + h.lines.filter((l) => l.startsWith("+")).length,
+					0,
+				);
+				const diffResult = generateNumberedDiff("", newContent);
+				fileDiffs.push({
+					path: action.path,
+					operation: "add",
+					added,
+					removed: 0,
+					diff: diffResult.diff,
+					firstChangedLine: diffResult.firstChangedLine,
+				});
+				progressFile.added = added;
+				progressFile.done = true;
+				emitProgress(opIndex + 1, opIndex);
 				continue;
 			}
 
 			if (action.kind === "delete") {
 				const absolutePath = resolvePatchPath(action.path, options);
+				const oldContent = await readFile(absolutePath, "utf8");
 				await rm(absolutePath, { force: false });
 				files.push(action.path);
+				const removed = countContentLines(oldContent);
+				const diffResult = generateNumberedDiff(oldContent, "");
+				fileDiffs.push({
+					path: action.path,
+					operation: "delete",
+					added: 0,
+					removed,
+					diff: diffResult.diff,
+					firstChangedLine: diffResult.firstChangedLine,
+				});
+				progressFile.removed = removed;
+				progressFile.done = true;
+				emitProgress(opIndex + 1, opIndex);
 				continue;
 			}
 
 			const absolutePath = resolvePatchPath(action.path, options);
-			let content = await readFile(absolutePath, "utf8");
+			const original = await readFile(absolutePath, "utf8");
+			let content = original;
 			for (const hunk of action.hunks) {
 				content = replaceOnce(content, hunkOldText(hunk), hunkNewText(hunk), action.path);
 			}
@@ -255,6 +489,28 @@ export async function applyPatch(
 				await rename(absolutePath, absoluteMoveTo);
 			}
 			files.push(action.moveTo ? `${action.path} -> ${action.moveTo}` : action.path);
+			const added = action.hunks.reduce(
+				(sum, h) => sum + h.lines.filter((l) => l.startsWith("+")).length,
+				0,
+			);
+			const removed = action.hunks.reduce(
+				(sum, h) => sum + h.lines.filter((l) => l.startsWith("-")).length,
+				0,
+			);
+			const diffResult = generateNumberedDiff(original, content);
+			fileDiffs.push({
+				path: action.path,
+				moveTo: action.moveTo,
+				operation: "update",
+				added,
+				removed,
+				diff: diffResult.diff,
+				firstChangedLine: diffResult.firstChangedLine,
+			});
+			progressFile.added = added;
+			progressFile.removed = removed;
+			progressFile.done = true;
+			emitProgress(opIndex + 1, opIndex);
 		}
 	} catch (error) {
 		const applied = files.join(", ") || "none";
@@ -268,5 +524,8 @@ export async function applyPatch(
 	return {
 		files,
 		summary: `Applied patch: ${parsed.actions.map(actionSummary).join(", ")}`,
+		filesChanged: fileDiffs.length,
+		fileDiffs,
+		diff: combineFileDiffs(fileDiffs),
 	};
 }

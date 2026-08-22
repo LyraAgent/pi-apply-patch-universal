@@ -6,9 +6,17 @@
  * - Off match: hide apply_patch, restore edit/write if this extension removed them
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { renderDiff } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { isTargetModel, loadConfig } from "./config.js";
-import { applyPatch } from "./patch.js";
+import {
+	applyPatch,
+	type ApplyPatchFileDiff,
+	type ApplyPatchProgress,
+	type ApplyPatchResult,
+} from "./patch.js";
+import { parseApplyPatchInputProgress } from "./progress.js";
 import { openApplyPatchSettings } from "./settings-ui.js";
 
 const NATIVE_EDIT_TOOLS = ["edit", "write"] as const;
@@ -19,6 +27,48 @@ const APPLY_PATCH_PARAMS = Type.Object({
 			"The entire contents of the apply_patch command beginning with '*** Begin Patch' and ending with '*** End Patch'. Every line in '*** Add File: <path>' MUST start with '+'. In '*** Update File: <path>', use '@@' context blocks, ' ' for unchanged context, '-' for deletions, and '+' for additions.",
 	}),
 });
+
+interface ThemeLike {
+	fg(color: string, text: string): string;
+	bold(text: string): string;
+}
+
+interface ApplyPatchRenderFile {
+	path: string;
+	moveTo?: string;
+	operation: "add" | "delete" | "update";
+	added: number;
+	removed: number;
+	done?: boolean;
+}
+
+function operationCode(operation: "add" | "delete" | "update"): "A" | "D" | "U" {
+	if (operation === "add") return "A";
+	if (operation === "delete") return "D";
+	return "U";
+}
+
+function formatTarget(file: Pick<ApplyPatchRenderFile, "path" | "moveTo">): string {
+	return file.moveTo ? `${file.path} -> ${file.moveTo}` : file.path;
+}
+
+function formatCounterLine(
+	theme: ThemeLike,
+	file: ApplyPatchRenderFile,
+	options?: { currentFile?: string; showDone?: boolean; includePath?: boolean },
+): string {
+	const includePath = options?.includePath ?? true;
+	let line = `${theme.fg("toolDiffAdded", `+${file.added}`)} ${theme.fg("toolDiffRemoved", `-${file.removed}`)} ${theme.fg("warning", operationCode(file.operation))}`;
+	if (includePath) {
+		line += ` ${theme.fg("accent", formatTarget(file))}`;
+	}
+	if (options?.showDone && file.done) {
+		line += theme.fg("muted", " ✓");
+	} else if (options?.currentFile && options.currentFile === file.path) {
+		line += theme.fg("warning", " ← applying");
+	}
+	return line;
+}
 
 function arraysEqual(a: string[], b: string[]): boolean {
 	if (a.length !== b.length) return false;
@@ -71,17 +121,97 @@ export default function piApplyPatch(pi: ExtensionAPI) {
 		description:
 			"Apply a Codex-style multi-file patch to create, modify, or delete files. Input must start with '*** Begin Patch' and end with '*** End Patch'.\n\nRules:\n- Add File: each line of content MUST begin with '+' (e.g. +code)\n- Update File: use @@ context markers, ' ' for unchanged lines, '-' for deletions, '+' for additions\n- Delete File: *** Delete File: <path>\n- Move/Rename: *** Update File: <old> followed by *** Move to: <new>\n\nExample:\n*** Begin Patch\n*** Add File: src/new.py\n+def hello():\n+    print('hello')\n*** Update File: src/main.py\n@@ def run():\n-    old()\n+    hello()\n*** Delete File: obsolete.py\n*** End Patch",
 		parameters: APPLY_PATCH_PARAMS,
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		renderCall(args, theme) {
+			const input = typeof args?.input === "string" ? args.input : "";
+			const progress = parseApplyPatchInputProgress(input);
+
+			let text = theme.fg("toolTitle", theme.bold("apply_patch"));
+			if (progress.totalOperations > 0) {
+				text += theme.fg(
+					"muted",
+					` (${progress.totalOperations} file${progress.totalOperations === 1 ? "" : "s"})`,
+				);
+			}
+			if (progress.files.length > 0) {
+				text += `\n${progress.files.map((file) => formatCounterLine(theme, file, { includePath: true })).join("\n")}`;
+			}
+
+			return new Text(text, 0, 0);
+		},
+		renderResult(result, { expanded, isPartial }, theme) {
+			const details = result.details as ApplyPatchResult | ApplyPatchProgress | undefined;
+			const textBlock = result.content.find((block) => block.type === "text");
+			const baseText = textBlock?.type === "text" ? textBlock.text : "";
+
+			if (isPartial) {
+				if (expanded && details?.diff && details.diff.length > 0) {
+					return new Text(renderDiff(details.diff), 0, 0);
+				}
+
+				if (!expanded && details?.stage === "apply_progress" && Array.isArray(details.files)) {
+					if (details.files.length > 0) {
+						const count = details.totalOperations ?? details.files.length;
+						const title = `${theme.fg("toolTitle", theme.bold("apply_patch"))}${theme.fg("muted", ` (${count} file${count === 1 ? "" : "s"})`)}`;
+						const lines = details.files
+							.map((file) => formatCounterLine(theme, file, { includePath: true }))
+							.join("\n");
+						return new Text(`${title}\n${lines}`, 0, 0);
+					}
+					const total = details.totalOperations ?? details.files.length;
+					const done = details.completedOperations ?? 0;
+					return new Text(theme.fg("warning", `Applying patch ${done}/${total}...`), 0, 0);
+				}
+
+				return new Text(theme.fg("warning", baseText || "Applying patch..."), 0, 0);
+			}
+
+			if (details?.diff && details.diff.length > 0) {
+				if (expanded) {
+					return new Text(renderDiff(details.diff), 0, 0);
+				}
+				if (Array.isArray(details.fileDiffs) && details.fileDiffs.length > 0) {
+					const count = details.fileDiffs.length;
+					const title = `${theme.fg("toolTitle", theme.bold("apply_patch"))}${theme.fg("muted", ` (${count} file${count === 1 ? "" : "s"})`)}`;
+					const lines = details.fileDiffs
+						.map((file) => formatCounterLine(theme, file, { includePath: true }))
+						.join("\n");
+					return new Text(`${title}\n${lines}`, 0, 0);
+				}
+			}
+
+			return new Text(baseText, 0, 0);
+		},
+		async execute(_toolCallId, params, _signal, onUpdate, ctx) {
 			const config = loadConfig();
 			if (!isTargetModel(ctx.model, config)) {
 				throw new Error(
 					"apply_patch is disabled for this model. Run /apply-patch to configure targets.",
 				);
 			}
-			const result = await applyPatch(params.input, {
-				cwd: ctx.cwd,
-				allowAbsolutePaths: config.allowAbsolutePaths,
+
+			onUpdate?.({
+				content: [{ type: "text" as const, text: "Validating apply_patch payload..." }],
+				details: { stage: "validate" },
 			});
+
+			const result = await applyPatch(
+				params.input,
+				{
+					cwd: ctx.cwd,
+					allowAbsolutePaths: config.allowAbsolutePaths,
+				},
+				(progress) => {
+					onUpdate?.({
+						content: [
+							{
+								type: "text" as const,
+								text: `Applying patch ${progress.completedOperations}/${progress.totalOperations}...`,
+							},
+						],
+						details: progress,
+					});
+				},
+			);
 			return {
 				content: [
 					{

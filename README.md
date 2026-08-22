@@ -8,6 +8,8 @@ Works seamlessly with Claude, Gemini, DeepSeek, GPT, and custom API relays.
 ## Features
 
 - **Universal Model Support**: Compatible with all models in `~/.pi/agent/models.json` (Claude, Gemini, DeepSeek, GPT).
+- **Line-Numbered Colored Diff UI**: Rich TUI rendering powered by Pi's native `renderDiff`, displaying colored unified diffs with exact line numbers and per-file `+X -Y` counters.
+- **Live Streaming Progress**: Real-time counter preview while the model streams patch arguments.
 - **Zero-Error Prompt Guidelines**: Explicit formatting rules and examples prevent syntax retries.
 - **Interactive TUI Configuration**: Manage active providers and models with `/apply-patch`.
 - **Native Edit Protection**: Automatically hides and blocks native `edit`/`write` tools when active, and restores them when switching away.
@@ -76,7 +78,7 @@ Settings are persisted in `~/.pi/agent/pi-apply-patch.json`. You can also create
 
 ## Acknowledgements
 
-Built upon and enhanced from **[WufeiHalf/pi-apply_patch](https://github.com/WufeiHalf/pi-apply_patch)**.  
+Built upon and enhanced from **[WufeiHalf/pi-apply_patch](https://github.com/WufeiHalf/pi-apply_patch)** and **[matsuzaka-yuki/pi-apply-patch-plus](https://github.com/matsuzaka-yuki/pi-apply-patch-plus)**.  
 Special thanks to **[@WufeiHalf](https://github.com/WufeiHalf)** for the configurable architecture and interactive TUI settings design.
 
 ## License

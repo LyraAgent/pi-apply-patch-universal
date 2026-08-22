@@ -8,6 +8,8 @@
 ## 特性
 
 - **全模型通用**：支持 `~/.pi/agent/models.json` 中的任意模型（Claude、Gemini、DeepSeek、GPT、通义千问等）。
+- **彩色行号 Diff 渲染与实时进度**：深度集成 Pi 原生 `renderDiff`，在终端中展示带有精确行号与词级高亮的彩色 Diff 补丁，折叠状态下直观展示逐文件 `+X -Y` 增减计数。
+- **流式参数实时解析**：在模型生成工具调用参数时即时解析并展示文件变动进度。
 - **零报错语法引导**：内置清晰的格式规范与示例，杜绝模型首次新建文件漏加 `+` 等语法报错。
 - **交互式配置面板**：在终端输入 `/apply-patch` 即可图形化勾选启用的渠道与模型。
 - **原生工具智能屏蔽与还原**：激活时可选隐藏并拦截原生 `edit`/`write` 工具；切回未配置模型时自动无缝还原。
@@ -76,7 +78,7 @@ pi install git:github.com/LyraAgent/pi-apply-patch-universal
 
 ## 致谢
 
-本项目基于 **[WufeiHalf/pi-apply_patch](https://github.com/WufeiHalf/pi-apply_patch)** 进行优化与增强。  
+本项目基于 **[WufeiHalf/pi-apply_patch](https://github.com/WufeiHalf/pi-apply_patch)** 与 **[matsuzaka-yuki/pi-apply-patch-plus](https://github.com/matsuzaka-yuki/pi-apply-patch-plus)** 进行优化与增强。  
 感谢 **[@WufeiHalf](https://github.com/WufeiHalf)** 提供的可配置架构与交互式 TUI 设置面板设计。
 
 ## 开源协议
