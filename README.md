@@ -28,12 +28,15 @@ Reload Pi after installation:
 ## Configuration
 
 ### 1. Interactive Menu
-Run inside Pi:
+Inside your Pi session, run:
 ```text
 /apply-patch
 ```
+Use the arrow keys and spacebar to toggle active providers and individual models automatically discovered from `~/.pi/agent/models.json`.
 
-### 2. Manual Config (`~/.pi/agent/pi-apply-patch.json`)
+### 2. Configuration File (`~/.pi/agent/pi-apply-patch.json`)
+Settings are persisted in `~/.pi/agent/pi-apply-patch.json`. You can also create or edit it manually:
+
 ```json
 {
   "providers": ["cliproxy", "openai"],
@@ -43,12 +46,18 @@ Run inside Pi:
 }
 ```
 
-| Field | Description | Default |
-| :--- | :--- | :--- |
-| `providers` | Enable for all models under these provider IDs | `[]` |
-| `models` | Enable for specific `provider/model_id` or `model_id` | `[]` |
-| `disableNativeEdit` | Hide and block native `edit` & `write` when active | `true` |
-| `allowAbsolutePaths` | Allow patches outside working directory | `false` |
+#### Field Details
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `providers` | `string[]` | `[]` | **Provider-level matching**. All models under the specified provider IDs (e.g., `"cliproxy"`, `"openai"`, `"aio"`) will automatically activate `apply_patch`. |
+| `models` | `string[]` | `[]` | **Model-level granular matching**. Enables `apply_patch` for specific models. Accepts full reference `provider/model_id` (e.g., `"openai/gpt-4o"`), bare `model_id`, or `provider:model_id`. Useful for enabling patch mode only on top-tier coding models while keeping others on standard tools. |
+| `disableNativeEdit` | `boolean` | `true` | **Tool exclusivity policy**. When `true`, hides and blocks built-in `edit` and `write` tools whenever `apply_patch` is active, compelling the LLM to use token-efficient diff patches and avoiding accidental full-file rewrites. Switching to non-target models automatically restores native tools. Set to `false` to keep all tools available concurrently. |
+| `allowAbsolutePaths` | `boolean` | `false` | **Path traversal sandbox**. When `false` (recommended), strictly restricts all patch operations within the current working directory (`cwd`) to prevent accidental edits outside your project root. Set to `true` only if you explicitly need cross-directory patch operations. |
+
+#### Activation Logic
+- A model is **active** if it matches any entry in `models` **OR** its provider is in `providers`.
+- If both `providers` and `models` are empty `[]`, the extension remains completely inactive (safe default).
 
 ## Patch Syntax
 

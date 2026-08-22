@@ -32,8 +32,11 @@ pi install git:github.com/LyraAgent/pi-apply-patch-universal
 ```text
 /apply-patch
 ```
+通过上下方向键和空格键，快速勾选从 `~/.pi/agent/models.json` 自动读取的渠道和模型列表。
 
-### 2. 手动修改配置文件（`~/.pi/agent/pi-apply-patch.json`）
+### 2. 配置文件说明（`~/.pi/agent/pi-apply-patch.json`）
+菜单设置会自动保存至 `~/.pi/agent/pi-apply-patch.json`，你也可以直接手动编辑此文件：
+
 ```json
 {
   "providers": ["cliproxy", "openai"],
@@ -43,12 +46,18 @@ pi install git:github.com/LyraAgent/pi-apply-patch-universal
 }
 ```
 
-| 字段 | 说明 | 默认值 |
-| :--- | :--- | :--- |
-| `providers` | 开启此 Provider 列表下的所有模型 | `[]` |
-| `models` | 针对特定模型开启（`provider/model_id` 或 `model_id`） | `[]` |
-| `disableNativeEdit` | 激活时隐藏并拦截原生 `edit` 与 `write` | `true` |
-| `allowAbsolutePaths` | 是否允许补丁修改当前工作区以外的文件 | `false` |
+#### 字段详解
+
+| 字段 | 类型 | 默认值 | 详细说明 |
+| :--- | :--- | :--- | :--- |
+| `providers` | `string[]` | `[]` | **按渠道批量开启**。只要模型归属于列表中的 Provider ID（例如 `"cliproxy"`、`"openai"`、`"aio"` 等），该渠道下的所有模型都会自动启用 `apply_patch`。 |
+| `models` | `string[]` | `[]` | **按模型精准开启**。针对特定高智商模型单独启用。支持 `provider/model_id`（如 `"cliproxy/claude-sonnet-4-6"`）、裸 `model_id` 或 `provider:model_id` 格式。适合在同一渠道下仅给强力代码模型开启补丁能力。 |
+| `disableNativeEdit` | `boolean` | `true` | **原生工具智能屏蔽与保护**。为 `true` 时，在当前模型激活 `apply_patch` 期间，自动隐藏并拦截原生的 `edit` 和 `write` 工具，强迫大模型统一使用极省 Token 的局部增量 Diff，彻底杜绝模型偷懒全文件重写；切回未配置模型时自动无缝还原。设为 `false` 则三者共存。 |
+| `allowAbsolutePaths` | `boolean` | `false` | **工作区路径沙箱防护**。为 `false`（推荐）时，所有补丁操作严格限制在当前工作区目录（`cwd`）内部，防止大模型因相对路径逃逸或绝对路径误改系统敏感文件。仅在确需跨目录修改项目外文件时设为 `true`。 |
+
+#### 匹配规则
+- **激活条件（或关系）**：当前模型的 Provider 命中 `providers` 列表，**或** 模型 ID 命中 `models` 列表。
+- **安全默认**：当 `providers` 与 `models` 均为空数组 `[]` 时，扩展处于完全休眠状态，不影响任何默认工具。
 
 ## 补丁语法规范
 
