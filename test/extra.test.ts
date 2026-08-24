@@ -350,4 +350,104 @@ describe("advanced patch resilience & diagnostics", () => {
 		const updated = await readFile(path.join(cwd, "full.txt"), "utf8");
 		assert.equal(updated, "new A\nnew B\nnew C\nnew D\n");
 	});
+
+	it("handles multi-line markdown blockquotes where continuation lines lack '-' prefix", async () => {
+		const cwd = await makeTempDir();
+		const docContent = [
+			"# Design Specification",
+			"",
+			"> M2 修正记录：`WEAVER` 由 `#2E9BE0` 调深为 `#1C7FC0`。",
+			"> 原因是这三个主色要画 halo 与道具线条，属非文本图形。",
+			"> 另外 `#2E9BE0` 是 2.1 节 M1 已经废弃掉的旧 `--sky-500`。",
+			"",
+			"## Next Section",
+		].join("\n") + "\n";
+
+		await mkdir(path.join(cwd, "docs"), { recursive: true });
+		await writeFile(path.join(cwd, "docs/spec.md"), docContent, "utf8");
+
+		// Notice line 2 and 3 start with "> " without explicit "-"
+		const patchText = [
+			"*** Begin Patch",
+			"*** Update File: docs/spec.md",
+			"@@ -3,3 +3,1 @@",
+			"-> M2 修正记录：`WEAVER` 由 `#2E9BE0` 调深为 `#1C7FC0`。",
+			"> 原因是这三个主色要画 halo 与道具线条，属非文本图形。",
+			"> 另外 `#2E9BE0` 是 2.1 节 M1 已经废弃掉的旧 `--sky-500`。",
+			"+> M2 修正记录：`WEAVER` 调整为樱粉色 `#DB497E`。",
+			"*** End " + "Patch",
+		].join("\n");
+
+		const result = await applyPatch(patchText, { cwd });
+		assert.equal(result.filesChanged, 1);
+		const updated = await readFile(path.join(cwd, "docs/spec.md"), "utf8");
+		const expected = [
+			"# Design Specification",
+			"",
+			"> M2 修正记录：`WEAVER` 调整为樱粉色 `#DB497E`。",
+			"",
+			"## Next Section",
+		].join("\n") + "\n";
+		assert.equal(updated, expected);
+	});
+
+	it("handles hunk lines containing literal \\n escaped newlines", async () => {
+		const cwd = await makeTempDir();
+		const docContent = [
+			"# Title",
+			"> line 1",
+			"> line 2",
+			"> line 3",
+			"# End",
+		].join("\n") + "\n";
+
+		await writeFile(path.join(cwd, "escaped.md"), docContent, "utf8");
+
+		// Hunk line literally containing \n inside a single line
+		const patchText = [
+			"*** Begin Patch",
+			"*** Update File: escaped.md",
+			"@@",
+			"-> line 1\\n> line 2\\n> line 3",
+			"+> line 1 replacement\\n> line 2 replacement",
+			"*** End " + "Patch",
+		].join("\n");
+
+		const result = await applyPatch(patchText, { cwd });
+		assert.equal(result.filesChanged, 1);
+		const updated = await readFile(path.join(cwd, "escaped.md"), "utf8");
+		const expected = [
+			"# Title",
+			"> line 1 replacement",
+			"> line 2 replacement",
+			"# End",
+		].join("\n") + "\n";
+		assert.equal(updated, expected);
+	});
+
+	it("uses @@ -L,N @@ line number hint to anchor search in large documents", async () => {
+		const cwd = await makeTempDir();
+		// Generate 200 lines
+		const lines: string[] = [];
+		for (let i = 1; i <= 200; i++) {
+			lines.push(`item_${i}_value = ${i};`);
+		}
+		await writeFile(path.join(cwd, "large.txt"), lines.join("\n") + "\n", "utf8");
+
+		const patchText = [
+			"*** Begin Patch",
+			"*** Update File: large.txt",
+			"@@ -150,3 +150,3 @@",
+			" item_149_value = 149;",
+			"-item_150_value = 150;",
+			"+item_150_value = 99999;",
+			" item_151_value = 151;",
+			"*** End " + "Patch",
+		].join("\n");
+
+		const result = await applyPatch(patchText, { cwd });
+		assert.equal(result.filesChanged, 1);
+		const updated = await readFile(path.join(cwd, "large.txt"), "utf8");
+		assert.ok(updated.includes("item_150_value = 99999;"));
+	});
 });

@@ -87,6 +87,22 @@ function parseHeader(line: string): { kind: PatchActionKind; path: string } | un
 	return { kind, path: cleanPatchPath(match[2]!) };
 }
 
+export function parseHunkHeaderLineNumber(header?: string): number | undefined {
+	if (!header) return undefined;
+	// Matches -55 or -55,4 or 55,4
+	const match = header.match(/-(\d+)(?:,\d+)?/);
+	if (match) {
+		const num = parseInt(match[1]!, 10);
+		if (!Number.isNaN(num) && num > 0) return num;
+	}
+	const matchPlain = header.match(/^(\d+)/);
+	if (matchPlain) {
+		const num = parseInt(matchPlain[1]!, 10);
+		if (!Number.isNaN(num) && num > 0) return num;
+	}
+	return undefined;
+}
+
 export function parseApplyPatch(input: string): { actions: PatchAction[] } {
 	if (typeof input !== "string" || input.trim().length === 0) {
 		throw new Error("apply_patch input must be a non-empty string.");
@@ -152,8 +168,8 @@ export function parseApplyPatch(input: string): { actions: PatchAction[] } {
 				} else if (bodyLine.startsWith(" ")) {
 					current.lines.push(bodyLine);
 				} else {
-					// Blank line or un-prefixed context line: treat as context
-					current.lines.push(` ${bodyLine}`);
+					// Mark as un-prefixed so candidate generators can test both context and continuation
+					current.lines.push(`?${bodyLine}`);
 				}
 			} else if (action.kind === "delete") {
 				if (bodyLine.startsWith("-") || bodyLine.startsWith(" ")) {
@@ -262,6 +278,10 @@ function hunkToChunks(hunkLines: string[]): { oldChunk: string[]; newChunk: stri
 		} else if (line.startsWith(" ")) {
 			oldChunk.push(line.slice(1));
 			newChunk.push(line.slice(1));
+		} else if (line.startsWith("?")) {
+			// Unprefixed line default: treat as context
+			oldChunk.push(line.slice(1));
+			newChunk.push(line.slice(1));
 		} else {
 			oldChunk.push(line);
 			newChunk.push(line);
@@ -270,16 +290,86 @@ function hunkToChunks(hunkLines: string[]): { oldChunk: string[]; newChunk: stri
 	return { oldChunk, newChunk };
 }
 
+function expandLiteralNewlines(lines: string[]): string[] {
+	const result: string[] = [];
+	for (const line of lines) {
+		if (!line.includes("\\n")) {
+			result.push(line);
+			continue;
+		}
+		const prefix = line[0] ?? " ";
+		const parts = line.slice(1).split("\\n");
+		for (let i = 0; i < parts.length; i++) {
+			const part = parts[i]!;
+			if (i === 0) {
+				result.push(`${prefix}${part}`);
+			} else if (part.startsWith("+") || part.startsWith("-") || part.startsWith(" ")) {
+				result.push(part);
+			} else {
+				result.push(`${prefix}${part}`);
+			}
+		}
+	}
+	return result;
+}
+
+function buildCandidateHunkLineSets(rawLines: string[]): string[][] {
+	const candidates: string[][] = [];
+
+	// Candidate A: Continuation mode (unprefixed '?' inside '-' or '+' block inherits that operation)
+	let hasUnprefixed = rawLines.some((l) => l.startsWith("?"));
+	if (hasUnprefixed) {
+		const candCont: string[] = [];
+		let inMinusBlock = false;
+		for (const l of rawLines) {
+			if (l.startsWith("-")) {
+				inMinusBlock = true;
+				candCont.push(l);
+			} else if (l.startsWith("+")) {
+				inMinusBlock = false;
+				candCont.push(l);
+			} else if (l.startsWith("?")) {
+				// Unprefixed line immediately following '-' before any '+' is continuation of delete block
+				if (inMinusBlock) {
+					candCont.push(`-${l.slice(1)}`);
+				} else {
+					candCont.push(` ${l.slice(1)}`);
+				}
+			} else {
+				candCont.push(l);
+			}
+		}
+		candidates.push(candCont);
+	}
+
+	// Candidate B: Context mode (all unprefixed '?' treated as context ' ')
+	const candContext = rawLines.map((l) => (l.startsWith("?") ? ` ${l.slice(1)}` : l));
+	candidates.push(candContext);
+
+	// Candidate C & D: Expanded literal newlines if any line has `\n`
+	const hasEscapedNewlines = rawLines.some((l) => l.includes("\\n"));
+	if (hasEscapedNewlines) {
+		candidates.push(expandLiteralNewlines(candidates[0]!));
+		if (candidates[1]) {
+			candidates.push(expandLiteralNewlines(candidates[1]));
+		}
+	}
+
+	return candidates;
+}
+
 function generateHunkDiagnostic(
 	fileLines: string[],
 	hunk: PatchHunk,
 	filePath: string,
 	hunkIndex: number,
 ): string {
-	const { oldChunk } = hunkToChunks(hunk.lines);
+	const candLines = buildCandidateHunkLineSets(hunk.lines)[0]!;
+	const { oldChunk } = hunkToChunks(candLines);
 	const headerInfo = hunk.header ? ` (${hunk.header})` : "";
+	const hintLine = parseHunkHeaderLineNumber(hunk.header);
 
-	const expectedFormatted = hunk.lines
+	const expectedFormatted = candLines
 		.map((l) => {
 			if (l.startsWith("+")) return `  |+ ${l.slice(1)}`;
 			if (l.startsWith("-")) return `  |- ${l.slice(1)}`;
@@ -309,11 +399,21 @@ function generateHunkDiagnostic(
 				matches++;
 			}
 		}
-		const score = matches / oldChunk.length;
+		let score = matches / oldChunk.length;
+		if (hintLine !== undefined) {
+			const dist = Math.abs(i - (hintLine - 1));
+			if (dist <= 5) score += 0.2;
+			else if (dist <= 20) score += 0.1;
+		}
 		if (score > bestScore) {
 			bestScore = score;
 			bestIndex = i;
 		}
+	}
+
+	if (bestScore <= 0.1 && hintLine !== undefined) {
+		bestIndex = Math.max(0, Math.min(hintLine - 1, fileLines.length - 1));
+		bestScore = 0.15;
 	}
 
 	let closestDiagnostic = "(No similar context found in file)";
@@ -334,7 +434,8 @@ function generateHunkDiagnostic(
 			const marker = isMismatch ? " <-- mismatch" : "";
 			actualLinesFormatted.push(`  | ${lineNumStr}: ${content}${marker}`);
 		}
-		closestDiagnostic = `Closest match in file (around line ${bestIndex + 1}, similarity ${Math.round(bestScore * 100)}%):\n${actualLinesFormatted.join("\n")}`;
+		const simPercent = Math.min(100, Math.round(bestScore * 100));
+		closestDiagnostic = `Closest match in file (around line ${bestIndex + 1}, similarity ${simPercent}%):\n${actualLinesFormatted.join("\n")}`;
 	}
 
 	return `Patch context not found in ${filePath}\n\nFailed at Hunk #${hunkIndex + 1}${headerInfo}:\nExpected context:\n${expectedFormatted}\n\n${closestDiagnostic}`;
@@ -347,96 +448,123 @@ function applyHunkWithFuzz(
 	filePath: string,
 	hunkIndex: number,
 ): { nextLines: string[]; newCursor: number } {
-	const rawLines = hunk.lines;
+	const candidateLineSets = buildCandidateHunkLineSets(hunk.lines);
+	const hintLine = parseHunkHeaderLineNumber(hunk.header);
 
-	for (let fuzz = 0; fuzz <= 2; fuzz++) {
-		let startIdx = 0;
-		let endIdx = rawLines.length;
+	for (const candidateLines of candidateLineSets) {
+		for (let fuzz = 0; fuzz <= 2; fuzz++) {
+			let startIdx = 0;
+			let endIdx = candidateLines.length;
 
-		let leadingDropped = 0;
-		while (leadingDropped < fuzz && startIdx < endIdx) {
-			const l = rawLines[startIdx]!;
-			if (l.startsWith(" ") || (!l.startsWith("+") && !l.startsWith("-"))) {
-				startIdx++;
-				leadingDropped++;
-			} else {
-				break;
-			}
-		}
-
-		let trailingDropped = 0;
-		while (trailingDropped < fuzz && endIdx > startIdx) {
-			const l = rawLines[endIdx - 1]!;
-			if (l.startsWith(" ") || (!l.startsWith("+") && !l.startsWith("-"))) {
-				endIdx--;
-				trailingDropped++;
-			} else {
-				break;
-			}
-		}
-
-		const subHunkLines = rawLines.slice(startIdx, endIdx);
-		const { oldChunk } = hunkToChunks(subHunkLines);
-
-		if (oldChunk.length === 0) {
-			const { newChunk } = hunkToChunks(subHunkLines);
-			const insertAt = Math.max(0, Math.min(cursor, fileLines.length));
-			const nextLines = [...fileLines];
-			nextLines.splice(insertAt, 0, ...newChunk);
-			return { nextLines, newCursor: insertAt + newChunk.length };
-		}
-
-		if (oldChunk.length > fileLines.length) {
-			continue;
-		}
-
-		const maxStart = fileLines.length - oldChunk.length;
-
-		for (let level = 1; level <= 4; level++) {
-			const normOld = oldChunk.map((l) => normalizeLineForMatch(l, level));
-
-			const checkAt = (idx: number): boolean => {
-				for (let j = 0; j < normOld.length; j++) {
-					if (normalizeLineForMatch(fileLines[idx + j]!, level) !== normOld[j]) return false;
+			let leadingDropped = 0;
+			while (leadingDropped < fuzz && startIdx < endIdx) {
+				const l = candidateLines[startIdx]!;
+				if (l.startsWith(" ") || (!l.startsWith("+") && !l.startsWith("-"))) {
+					startIdx++;
+					leadingDropped++;
+				} else {
+					break;
 				}
-				return true;
-			};
+			}
 
-			const buildReplacementLines = (matchStart: number): string[] => {
-				const replacement: string[] = [];
-				let oldOffset = 0;
-				for (const rawLine of subHunkLines) {
-					if (rawLine.startsWith("+")) {
-						replacement.push(rawLine.slice(1));
-					} else if (rawLine.startsWith("-")) {
-						oldOffset++;
-					} else if (rawLine.startsWith(" ")) {
-						replacement.push(fileLines[matchStart + oldOffset]!);
-						oldOffset++;
-					} else {
-						replacement.push(fileLines[matchStart + oldOffset]!);
-						oldOffset++;
+			let trailingDropped = 0;
+			while (trailingDropped < fuzz && endIdx > startIdx) {
+				const l = candidateLines[endIdx - 1]!;
+				if (l.startsWith(" ") || (!l.startsWith("+") && !l.startsWith("-"))) {
+					endIdx--;
+					trailingDropped++;
+				} else {
+					break;
+				}
+			}
+
+			const subHunkLines = candidateLines.slice(startIdx, endIdx);
+			const { oldChunk } = hunkToChunks(subHunkLines);
+
+			if (oldChunk.length === 0) {
+				const { newChunk } = hunkToChunks(subHunkLines);
+				const insertAt = Math.max(0, Math.min(cursor, fileLines.length));
+				const nextLines = [...fileLines];
+				nextLines.splice(insertAt, 0, ...newChunk);
+				return { nextLines, newCursor: insertAt + newChunk.length };
+			}
+
+			if (oldChunk.length > fileLines.length) {
+				continue;
+			}
+
+			const maxStart = fileLines.length - oldChunk.length;
+
+			for (let level = 1; level <= 4; level++) {
+				const normOld = oldChunk.map((l) => normalizeLineForMatch(l, level));
+
+				const checkAt = (idx: number): boolean => {
+					for (let j = 0; j < normOld.length; j++) {
+						if (normalizeLineForMatch(fileLines[idx + j]!, level) !== normOld[j]) return false;
+					}
+					return true;
+				};
+
+				const buildReplacementLines = (matchStart: number): string[] => {
+					const replacement: string[] = [];
+					let oldOffset = 0;
+					for (const rawLine of subHunkLines) {
+						if (rawLine.startsWith("+")) {
+							replacement.push(rawLine.slice(1));
+						} else if (rawLine.startsWith("-")) {
+							oldOffset++;
+						} else if (rawLine.startsWith(" ")) {
+							replacement.push(fileLines[matchStart + oldOffset]!);
+							oldOffset++;
+						} else {
+							replacement.push(fileLines[matchStart + oldOffset]!);
+							oldOffset++;
+						}
+					}
+					return replacement;
+				};
+
+				// If hintLine exists, test spiral search around hintLine first
+				if (hintLine !== undefined) {
+					const hintIdx = Math.max(0, Math.min(hintLine - 1, maxStart));
+					const maxRadius = Math.min(100, Math.max(hintIdx, maxStart - hintIdx));
+					for (let r = 0; r <= maxRadius; r++) {
+						const plusIdx = hintIdx + r;
+						if (plusIdx <= maxStart && checkAt(plusIdx)) {
+							const replacement = buildReplacementLines(plusIdx);
+							const nextLines = [...fileLines];
+							nextLines.splice(plusIdx, oldChunk.length, ...replacement);
+							return { nextLines, newCursor: plusIdx + replacement.length };
+						}
+						const minusIdx = hintIdx - r;
+						if (r > 0 && minusIdx >= 0 && minusIdx <= maxStart && checkAt(minusIdx)) {
+							const replacement = buildReplacementLines(minusIdx);
+							const nextLines = [...fileLines];
+							nextLines.splice(minusIdx, oldChunk.length, ...replacement);
+							return { nextLines, newCursor: minusIdx + replacement.length };
+						}
 					}
 				}
-				return replacement;
-			};
 
-			const clampedCursor = Math.max(0, Math.min(cursor, maxStart));
-			for (let i = clampedCursor; i <= maxStart; i++) {
-				if (checkAt(i)) {
-					const replacement = buildReplacementLines(i);
-					const nextLines = [...fileLines];
-					nextLines.splice(i, oldChunk.length, ...replacement);
-					return { nextLines, newCursor: i + replacement.length };
+				// Normal sequential search from cursor forward
+				const clampedCursor = Math.max(0, Math.min(cursor, maxStart));
+				for (let i = clampedCursor; i <= maxStart; i++) {
+					if (checkAt(i)) {
+						const replacement = buildReplacementLines(i);
+						const nextLines = [...fileLines];
+						nextLines.splice(i, oldChunk.length, ...replacement);
+						return { nextLines, newCursor: i + replacement.length };
+					}
 				}
-			}
 
-			for (let i = 0; i < clampedCursor; i++) {
-				if (checkAt(i)) {
-					const replacement = buildReplacementLines(i);
-					const nextLines = [...fileLines];
-					nextLines.splice(i, oldChunk.length, ...replacement);
-					return { nextLines, newCursor: i + replacement.length };
+				// Search backward from cursor to start
+				for (let i = 0; i < clampedCursor; i++) {
+					if (checkAt(i)) {
+						const replacement = buildReplacementLines(i);
+						const nextLines = [...fileLines];
+						nextLines.splice(i, oldChunk.length, ...replacement);
+						return { nextLines, newCursor: i + replacement.length };
+					}
 				}
 			}
 		}
