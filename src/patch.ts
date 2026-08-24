@@ -268,9 +268,10 @@ function stripMarker(line: string): string {
 }
 
 function addText(action: PatchAction): string {
-	return action.hunks
-		.flatMap((hunk) => hunk.lines.filter((line) => line.startsWith("+")).map(stripMarker))
-		.join("\n");
+	const lines = action.hunks.flatMap((hunk) =>
+		hunk.lines.filter((line) => line.startsWith("+")).map(stripMarker),
+	);
+	return lines.length > 0 ? `${lines.join("\n")}\n` : "";
 }
 
 export function detectLineEnding(content: string): "\r\n" | "\n" {

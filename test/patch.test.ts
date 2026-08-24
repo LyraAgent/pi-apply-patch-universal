@@ -129,7 +129,7 @@ describe("applyPatch execution with diff line numbers", () => {
 		assert.ok(updateDiff.diff.includes("+1 const v = 2;"));
 
 		// Verify disk state
-		assert.equal(await readFile(path.join(cwd, "new.ts"), "utf8"), "export const greeting = \"hello\";");
+		assert.equal(await readFile(path.join(cwd, "new.ts"), "utf8"), "export const greeting = \"hello\";\n");
 		assert.equal(await readFile(path.join(cwd, "app.ts"), "utf8"), "const v = 2;\nconsole.log(v);\n");
 		await assert.rejects(async () => await readFile(path.join(cwd, "old.ts"), "utf8"));
 
@@ -231,6 +231,6 @@ Done!`;
 		const result = await applyPatch(patchText, { cwd });
 		assert.equal(result.filesChanged, 1);
 		const content = await readFile(path.join(cwd, "created.ts"), "utf8");
-		assert.equal(content, "function fn1() {\n\treturn 1;\n}\n\nfunction fn2() {\n\treturn 2;\n}");
+		assert.equal(content, "function fn1() {\n\treturn 1;\n}\n\nfunction fn2() {\n\treturn 2;\n}\n");
 	});
 });
