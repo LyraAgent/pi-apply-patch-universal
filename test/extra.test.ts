@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { afterEach, describe, it } from "node:test";
@@ -423,6 +423,245 @@ describe("advanced patch resilience & diagnostics", () => {
 			"# End",
 		].join("\n") + "\n";
 		assert.equal(updated, expected);
+	});
+
+	it("preserves a UTF-8 BOM while matching the first line", async () => {
+		const cwd = await makeTempDir();
+		await writeFile(path.join(cwd, "bom.txt"), "\uFEFFfirst\r\nsecond\r\n", "utf8");
+
+		await applyPatch(
+			[
+				"*** Begin Patch",
+				"*** Update File: bom.txt",
+				"@@ -1,2 +1,2 @@",
+				"-first",
+				"+updated",
+				" second",
+				"*** End Patch",
+			].join("\n"),
+			{ cwd },
+		);
+
+		assert.equal(await readFile(path.join(cwd, "bom.txt"), "utf8"), "\uFEFFupdated\r\nsecond\r\n");
+	});
+
+	it("uses a zero-length hunk header to position pure insertions", async () => {
+		const cwd = await makeTempDir();
+		await writeFile(path.join(cwd, "insert.txt"), "one\ntwo\nthree\n", "utf8");
+
+		await applyPatch(
+			[
+				"*** Begin Patch",
+				"*** Update File: insert.txt",
+				"@@ -2,0 +3,1 @@",
+				"+inserted",
+				"*** End Patch",
+			].join("\n"),
+			{ cwd },
+		);
+
+		assert.equal(await readFile(path.join(cwd, "insert.txt"), "utf8"), "one\ntwo\ninserted\nthree\n");
+	});
+
+	it("refuses to overwrite existing Add File and Move targets", async () => {
+		const cwd = await makeTempDir();
+		await writeFile(path.join(cwd, "existing.txt"), "keep add target\n", "utf8");
+
+		await assert.rejects(
+			applyPatch(
+				[
+					"*** Begin Patch",
+					"*** Add File: existing.txt",
+					"+replacement",
+					"*** End Patch",
+				].join("\n"),
+				{ cwd },
+			),
+			/Add File refuses to overwrite existing path/,
+		);
+		assert.equal(await readFile(path.join(cwd, "existing.txt"), "utf8"), "keep add target\n");
+
+		await writeFile(path.join(cwd, "source.txt"), "source\n", "utf8");
+		await writeFile(path.join(cwd, "target.txt"), "keep move target\n", "utf8");
+		await assert.rejects(
+			applyPatch(
+				[
+					"*** Begin Patch",
+					"*** Update File: source.txt",
+					"*** Move to: target.txt",
+					"@@",
+					"-source",
+					"+updated source",
+					"*** End Patch",
+				].join("\n"),
+				{ cwd },
+			),
+			/Move target already exists/,
+		);
+		assert.equal(await readFile(path.join(cwd, "source.txt"), "utf8"), "source\n");
+		assert.equal(await readFile(path.join(cwd, "target.txt"), "utf8"), "keep move target\n");
+	});
+
+	it("rejects conflicting operations before modifying any file", async () => {
+		const cwd = await makeTempDir();
+		await writeFile(path.join(cwd, "same.txt"), "original\n", "utf8");
+
+		await assert.rejects(
+			applyPatch(
+				[
+					"*** Begin Patch",
+					"*** Update File: same.txt",
+					"@@",
+					"-original",
+					"+first",
+					"*** Delete File: same.txt",
+					"*** End Patch",
+				].join("\n"),
+				{ cwd },
+			),
+			/Multiple patch operations target the same path/,
+		);
+		assert.equal(await readFile(path.join(cwd, "same.txt"), "utf8"), "original\n");
+
+		await writeFile(path.join(cwd, "source.txt"), "source\n", "utf8");
+		await writeFile(path.join(cwd, "other.txt"), "other\n", "utf8");
+		await assert.rejects(
+			applyPatch(
+				[
+					"*** Begin Patch",
+					"*** Update File: source.txt",
+					"*** Move to: other.txt",
+					"@@",
+					"-source",
+					"+moved",
+					"*** Delete File: other.txt",
+					"*** End Patch",
+				].join("\n"),
+				{ cwd },
+			),
+			/Move target conflicts with another patch operation/,
+		);
+		assert.equal(await readFile(path.join(cwd, "source.txt"), "utf8"), "source\n");
+		assert.equal(await readFile(path.join(cwd, "other.txt"), "utf8"), "other\n");
+	});
+
+	it("blocks workspace escape through directory symlinks", async (t) => {
+		const cwd = await makeTempDir();
+		const outside = await makeTempDir();
+		await writeFile(path.join(outside, "secret.txt"), "secret\n", "utf8");
+		try {
+			await symlink(outside, path.join(cwd, "linked"), process.platform === "win32" ? "junction" : "dir");
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "EPERM" || code === "EACCES") {
+				t.skip("creating symlinks is not permitted in this environment");
+				return;
+			}
+			throw error;
+		}
+
+		await assert.rejects(
+			applyPatch(
+				[
+					"*** Begin Patch",
+					"*** Update File: linked/secret.txt",
+					"@@",
+					"-secret",
+					"+escaped",
+					"*** End Patch",
+				].join("\n"),
+				{ cwd },
+			),
+			/Patch path escapes cwd through symlink/,
+		);
+		assert.equal(await readFile(path.join(outside, "secret.txt"), "utf8"), "secret\n");
+	});
+
+	it("uses Codex-style @@ change context to disambiguate repeated blocks", async () => {
+		const cwd = await makeTempDir();
+		await writeFile(
+			path.join(cwd, "context.txt"),
+			"fn a\nx=10\ny=2\nfn b\nx=10\ny=20\n",
+			"utf8",
+		);
+
+		await applyPatch(
+			[
+				"*** Begin Patch",
+				"*** Update File: context.txt",
+				"@@ fn b",
+				"-x=10",
+				"+x=11",
+				"*** End Patch",
+			].join("\n"),
+			{ cwd },
+		);
+
+		assert.equal(
+			await readFile(path.join(cwd, "context.txt"), "utf8"),
+			"fn a\nx=10\ny=2\nfn b\nx=11\ny=20\n",
+		);
+	});
+
+	it("does not mistake numeric semantic context for a line-number header", async () => {
+		const cwd = await makeTempDir();
+		await writeFile(path.join(cwd, "numeric-context.txt"), "item-123\nvalue=1\nvalue=1\n", "utf8");
+
+		await applyPatch(
+			[
+				"*** Begin Patch",
+				"*** Update File: numeric-context.txt",
+				"@@ item-123",
+				"-value=1",
+				"+value=2",
+				"*** EndPatch".replace("EndPatch", "End Patch"),
+			].join("\n"),
+			{ cwd },
+		);
+
+		assert.equal(
+			await readFile(path.join(cwd, "numeric-context.txt"), "utf8"),
+			"item-123\nvalue=2\nvalue=1\n",
+		);
+	});
+
+	it("uses End of File to select the final repeated block", async () => {
+		const cwd = await makeTempDir();
+		await writeFile(path.join(cwd, "eof.txt"), "start\nrepeat\nmiddle\nrepeat\n", "utf8");
+
+		await applyPatch(
+			[
+				"*** Begin Patch",
+				"*** Update File: eof.txt",
+				"@@",
+				"-repeat",
+				"+final",
+				"*** End of File",
+				"*** End Patch",
+			].join("\n"),
+			{ cwd },
+		);
+
+		assert.equal(await readFile(path.join(cwd, "eof.txt"), "utf8"), "start\nrepeat\nmiddle\nfinal\n");
+	});
+
+	it("appends pure insertions marked End of File", async () => {
+		const cwd = await makeTempDir();
+		await writeFile(path.join(cwd, "append.txt"), "first\nsecond\n", "utf8");
+
+		await applyPatch(
+			[
+				"*** Begin Patch",
+				"*** Update File: append.txt",
+				"@@",
+				"+third",
+				"*** End of File",
+				"*** EndPatch".replace("EndPatch", "End Patch"),
+			].join("\n"),
+			{ cwd },
+		);
+
+		assert.equal(await readFile(path.join(cwd, "append.txt"), "utf8"), "first\nsecond\nthird\n");
 	});
 
 	it("uses @@ -L,N @@ line number hint to anchor search in large documents", async () => {

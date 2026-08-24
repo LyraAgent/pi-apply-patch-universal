@@ -2,7 +2,7 @@
  * Minimal Codex apply_patch parser/applier.
  * Patch language mirrors OpenAI Codex / cookbook format.
  */
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 
@@ -11,6 +11,7 @@ export type PatchActionKind = "add" | "update" | "delete";
 export interface PatchHunk {
 	header?: string;
 	lines: string[];
+	endOfFile?: boolean;
 }
 
 export interface PatchAction {
@@ -89,8 +90,8 @@ function parseHeader(line: string): { kind: PatchActionKind; path: string } | un
 
 export function parseHunkHeaderLineNumber(header?: string): number | undefined {
 	if (!header) return undefined;
-	// Matches -55 or -55,4 or 55,4
-	const match = header.match(/-(\d+)(?:,\d+)?/);
+	// Only a leading unified-diff range is a line anchor; semantic contexts may contain "-123".
+	const match = header.match(/^\s*-(\d+)(?:,\d+)?(?:\s+\+\d+(?:,\d+)?)?/);
 	if (match) {
 		const num = parseInt(match[1]!, 10);
 		if (!Number.isNaN(num) && num > 0) return num;
@@ -132,6 +133,11 @@ export function parseApplyPatch(input: string): { actions: PatchAction[] } {
 			const bodyLine = lines[index]!;
 			if (bodyLine.trim() === "*** End Patch" || parseHeader(bodyLine)) break;
 			if (bodyLine === "*** End of File" || bodyLine.startsWith("*** End of File")) {
+				current.endOfFile = true;
+				index++;
+				continue;
+			}
+			if (current.endOfFile && bodyLine.trim() === "") {
 				index++;
 				continue;
 			}
@@ -207,14 +213,50 @@ export function cleanPatchPath(pathValue: string): string {
 	return cleaned;
 }
 
+function isMissingPathError(error: unknown): boolean {
+	return (
+		typeof error === "object" &&
+		error !== null &&
+		"code" in error &&
+		((error as NodeJS.ErrnoException).code === "ENOENT" ||
+			(error as NodeJS.ErrnoException).code === "ENOTDIR")
+	);
+}
+
+function isInsidePath(root: string, target: string): boolean {
+	const rel = relative(root, target);
+	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function assertNoSymlinkEscape(cwd: string, absolute: string, pathValue: string): void {
+	const realCwd = realpathSync(cwd);
+	const rel = relative(cwd, absolute);
+	let current = cwd;
+
+	for (const segment of rel.split(/[\\/]+/).filter(Boolean)) {
+		current = resolve(current, segment);
+		try {
+			lstatSync(current);
+			const realCurrent = realpathSync(current);
+			if (!isInsidePath(realCwd, realCurrent)) {
+				throw new Error(`Patch path escapes cwd through symlink: ${pathValue}`);
+			}
+		} catch (error) {
+			if (isMissingPathError(error)) break;
+			throw error;
+		}
+	}
+}
+
 export function resolvePatchPath(pathValue: string, options: ApplyPatchOptions): string {
 	const cleaned = cleanPatchPath(pathValue);
 	const absolute = isAbsolute(cleaned) ? resolve(cleaned) : resolve(options.cwd, cleaned);
 	const cwd = resolve(options.cwd);
-	const rel = relative(cwd, absolute);
-	const insideCwd = rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-	if (!insideCwd && !options.allowAbsolutePaths) {
+	if (!isInsidePath(cwd, absolute) && !options.allowAbsolutePaths) {
 		throw new Error(`Patch path escapes cwd: ${pathValue}`);
+	}
+	if (!options.allowAbsolutePaths) {
+		assertNoSymlinkEscape(cwd, absolute, pathValue);
 	}
 	return absolute;
 }
@@ -441,6 +483,22 @@ function generateHunkDiagnostic(
 	return `Patch context not found in ${filePath}\n\nFailed at Hunk #${hunkIndex + 1}${headerInfo}:\nExpected context:\n${expectedFormatted}\n\n${closestDiagnostic}`;
 }
 
+function findChangeContextEnd(
+	fileLines: string[],
+	header: string | undefined,
+	cursor: number,
+): number | undefined {
+	if (!header || parseHunkHeaderLineNumber(header) !== undefined) return undefined;
+
+	for (let level = 1; level <= 4; level++) {
+		const normalizedHeader = normalizeLineForMatch(header, level);
+		for (let i = Math.max(0, cursor); i < fileLines.length; i++) {
+			if (normalizeLineForMatch(fileLines[i]!, level) === normalizedHeader) return i + 1;
+		}
+	}
+	return undefined;
+}
+
 function applyHunkWithFuzz(
 	fileLines: string[],
 	hunk: PatchHunk,
@@ -450,6 +508,8 @@ function applyHunkWithFuzz(
 ): { nextLines: string[]; newCursor: number } {
 	const candidateLineSets = buildCandidateHunkLineSets(hunk.lines);
 	const hintLine = parseHunkHeaderLineNumber(hunk.header);
+	const changeContextEnd = findChangeContextEnd(fileLines, hunk.header, cursor);
+	const searchCursor = changeContextEnd ?? cursor;
 
 	for (const candidateLines of candidateLineSets) {
 		for (let fuzz = 0; fuzz <= 2; fuzz++) {
@@ -483,7 +543,13 @@ function applyHunkWithFuzz(
 
 			if (oldChunk.length === 0) {
 				const { newChunk } = hunkToChunks(subHunkLines);
-				const insertAt = Math.max(0, Math.min(cursor, fileLines.length));
+				const insertionHeader = hunk.header?.match(/-(\d+),0(?:\s|$)/);
+				const hintedIndex = insertionHeader ? Number.parseInt(insertionHeader[1]!, 10) : undefined;
+				const logicalEnd = fileLines.at(-1) === "" ? fileLines.length - 1 : fileLines.length;
+				const insertionCursor = hunk.endOfFile
+					? logicalEnd
+					: (hintedIndex ?? changeContextEnd ?? cursor);
+				const insertAt = Math.max(0, Math.min(insertionCursor, fileLines.length));
 				const nextLines = [...fileLines];
 				nextLines.splice(insertAt, 0, ...newChunk);
 				return { nextLines, newCursor: insertAt + newChunk.length };
@@ -546,8 +612,20 @@ function applyHunkWithFuzz(
 					}
 				}
 
-				// Normal sequential search from cursor forward
-				const clampedCursor = Math.max(0, Math.min(cursor, maxStart));
+				// End-of-file chunks should prefer the final possible match, mirroring Codex.
+				if (hunk.endOfFile) {
+					const logicalEnd = fileLines.at(-1) === "" ? fileLines.length - 1 : fileLines.length;
+					const eofStart = logicalEnd - oldChunk.length;
+					if (eofStart >= searchCursor && eofStart <= maxStart && checkAt(eofStart)) {
+						const replacement = buildReplacementLines(eofStart);
+						const nextLines = [...fileLines];
+						nextLines.splice(eofStart, oldChunk.length, ...replacement);
+						return { nextLines, newCursor: eofStart + replacement.length };
+					}
+				}
+
+				// Normal sequential search from the semantic context or prior hunk.
+				const clampedCursor = Math.max(0, Math.min(searchCursor, maxStart));
 				for (let i = clampedCursor; i <= maxStart; i++) {
 					if (checkAt(i)) {
 						const replacement = buildReplacementLines(i);
@@ -557,8 +635,8 @@ function applyHunkWithFuzz(
 					}
 				}
 
-				// Search backward from cursor to start
-				for (let i = 0; i < clampedCursor; i++) {
+				// Preserve legacy fallback only when no semantic @@ context was resolved.
+				for (let i = changeContextEnd === undefined ? 0 : clampedCursor; i < clampedCursor; i++) {
 					if (checkAt(i)) {
 						const replacement = buildReplacementLines(i);
 						const nextLines = [...fileLines];
@@ -600,8 +678,19 @@ interface FileSnapshot {
 async function snapshotPath(absolutePath: string): Promise<FileSnapshot> {
 	try {
 		return { absolutePath, existed: true, data: await readFile(absolutePath) };
-	} catch {
-		return { absolutePath, existed: false };
+	} catch (error) {
+		if (isMissingPathError(error)) return { absolutePath, existed: false };
+		throw error;
+	}
+}
+
+function pathEntryExists(absolutePath: string): boolean {
+	try {
+		lstatSync(absolutePath);
+		return true;
+	} catch (error) {
+		if (isMissingPathError(error)) return false;
+		throw error;
 	}
 }
 
@@ -629,10 +718,98 @@ function operationCode(kind: PatchActionKind): "A" | "D" | "U" {
 	return "U";
 }
 
+function pathConflictKey(absolutePath: string): string {
+	return process.platform === "win32" ? absolutePath.toLowerCase() : absolutePath;
+}
+
+function validateActionPathConflicts(actions: PatchAction[], options: ApplyPatchOptions): void {
+	type PathOwner = { index: number; display: string };
+	const sources = new Map<string, PathOwner>();
+	const moveTargets = new Map<string, PathOwner>();
+
+	for (const [index, action] of actions.entries()) {
+		const absoluteSource = pathConflictKey(resolvePatchPath(action.path, options));
+		const priorSource = sources.get(absoluteSource);
+		if (priorSource !== undefined) {
+			throw new Error(
+				`Multiple patch operations target the same path: ${action.path} (already targeted by ${priorSource.display})`,
+			);
+		}
+		sources.set(absoluteSource, { index, display: action.path });
+
+		if (action.moveTo) {
+			const absoluteTarget = pathConflictKey(resolvePatchPath(action.moveTo, options));
+			const priorMove = moveTargets.get(absoluteTarget);
+			if (priorMove !== undefined) {
+				throw new Error(
+					`Multiple move operations target the same path: ${action.moveTo} (already targeted by ${priorMove.display})`,
+				);
+			}
+			moveTargets.set(absoluteTarget, { index, display: action.moveTo });
+		}
+	}
+
+	for (const [absoluteTarget, target] of moveTargets) {
+		const source = sources.get(absoluteTarget);
+		if (source !== undefined && source.index !== target.index) {
+			throw new Error(
+				`Move target conflicts with another patch operation: ${target.display} (also targeted by ${source.display})`,
+			);
+		}
+	}
+}
+
 function countContentLines(content: string): number {
 	if (content.length === 0) return 0;
 	const lines = content.split("\n");
 	return content.endsWith("\n") ? lines.length - 1 : lines.length;
+}
+
+function generateLinearNumberedDiff(
+	oldLines: string[],
+	newLines: string[],
+	contextLines: number,
+	lineNumWidth: number,
+): { diff: string; firstChangedLine: number | undefined } {
+	let prefix = 0;
+	while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) {
+		prefix++;
+	}
+
+	let suffix = 0;
+	while (
+		suffix < oldLines.length - prefix &&
+		suffix < newLines.length - prefix &&
+		oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]
+	) {
+		suffix++;
+	}
+
+	if (prefix === oldLines.length && prefix === newLines.length) {
+		return { diff: "", firstChangedLine: undefined };
+	}
+
+	const output: string[] = [];
+	const contextStart = Math.max(0, prefix - contextLines);
+	if (contextStart > 0) output.push(` ${"".padStart(lineNumWidth, " ")} ...`);
+	for (let i = contextStart; i < prefix; i++) {
+		output.push(` ${String(i + 1).padStart(lineNumWidth, " ")} ${oldLines[i]}`);
+	}
+	for (let i = prefix; i < oldLines.length - suffix; i++) {
+		output.push(`-${String(i + 1).padStart(lineNumWidth, " ")} ${oldLines[i]}`);
+	}
+	for (let i = prefix; i < newLines.length - suffix; i++) {
+		output.push(`+${String(i + 1).padStart(lineNumWidth, " ")} ${newLines[i]}`);
+	}
+
+	const suffixToShow = Math.min(contextLines, suffix);
+	for (let i = 0; i < suffixToShow; i++) {
+		const oldIndex = oldLines.length - suffix + i;
+		output.push(` ${String(oldIndex + 1).padStart(lineNumWidth, " ")} ${oldLines[oldIndex]}`);
+	}
+	if (suffix > suffixToShow) output.push(` ${"".padStart(lineNumWidth, " ")} ...`);
+
+	return { diff: output.join("\n"), firstChangedLine: prefix + 1 };
 }
 
 export function generateNumberedDiff(
@@ -643,6 +820,11 @@ export function generateNumberedDiff(
 	const oldLines = oldContent.length === 0 ? [] : oldContent.split("\n");
 	const newLines = newContent.length === 0 ? [] : newContent.split("\n");
 	const lineNumWidth = String(Math.max(oldLines.length, newLines.length, 1)).length;
+
+	// The exact LCS matrix is quadratic. Keep rendering bounded for generated or very large files.
+	if (oldLines.length * newLines.length > 1_000_000) {
+		return generateLinearNumberedDiff(oldLines, newLines, contextLines, lineNumWidth);
+	}
 
 	type Segment = { type: "equal" | "add" | "remove"; lines: string[] };
 	const lcs = Array.from({ length: oldLines.length + 1 }, () => Array<number>(newLines.length + 1).fill(0));
@@ -766,6 +948,7 @@ export async function applyPatch(
 	onProgress?: (progress: ApplyPatchProgress) => void,
 ): Promise<ApplyPatchResult> {
 	const parsed = parseApplyPatch(input);
+	validateActionPathConflicts(parsed.actions, options);
 	const files: string[] = [];
 	const fileDiffs: ApplyPatchFileDiff[] = [];
 	const snapshots = new Map<string, FileSnapshot>();
@@ -810,7 +993,19 @@ export async function applyPatch(
 				const absolutePath = resolvePatchPath(action.path, options);
 				const newContent = addText(action);
 				await mkdir(dirname(absolutePath), { recursive: true });
-				await writeFile(absolutePath, newContent, "utf8");
+				try {
+					await writeFile(absolutePath, newContent, { encoding: "utf8", flag: "wx" });
+				} catch (error) {
+					if (
+						typeof error === "object" &&
+						error !== null &&
+						"code" in error &&
+						(error as NodeJS.ErrnoException).code === "EEXIST"
+					) {
+						throw new Error(`Add File refuses to overwrite existing path: ${action.path}`);
+					}
+					throw error;
+				}
 				files.push(action.path);
 				const added = action.hunks.reduce(
 					(sum, h) => sum + h.lines.filter((l) => l.startsWith("+")).length,
@@ -853,14 +1048,26 @@ export async function applyPatch(
 			}
 
 			const absolutePath = resolvePatchPath(action.path, options);
+			const absoluteMoveTo = action.moveTo
+				? resolvePatchPath(action.moveTo, options)
+				: undefined;
+			if (
+				absoluteMoveTo !== undefined &&
+				absoluteMoveTo !== absolutePath &&
+				pathEntryExists(absoluteMoveTo)
+			) {
+				throw new Error(`Move target already exists: ${action.moveTo}`);
+			}
+
 			const raw = await readFile(absolutePath, "utf8");
-			const lineEnding = detectLineEnding(raw);
-			const originalNormalized = normalizeText(raw);
+			const bom = raw.startsWith("\uFEFF") ? "\uFEFF" : "";
+			const rawWithoutBom = bom ? raw.slice(1) : raw;
+			const lineEnding = detectLineEnding(rawWithoutBom);
+			const originalNormalized = normalizeText(rawWithoutBom);
 			const contentNormalized = applyHunksToContent(originalNormalized, action.hunks, action.path);
-			const finalDiskContent = restoreLineEndings(contentNormalized, lineEnding);
+			const finalDiskContent = bom + restoreLineEndings(contentNormalized, lineEnding);
 			await writeFile(absolutePath, finalDiskContent, "utf8");
-			if (action.moveTo) {
-				const absoluteMoveTo = resolvePatchPath(action.moveTo, options);
+			if (absoluteMoveTo !== undefined && absoluteMoveTo !== absolutePath) {
 				await mkdir(dirname(absoluteMoveTo), { recursive: true });
 				await rename(absolutePath, absoluteMoveTo);
 			}
@@ -891,10 +1098,16 @@ export async function applyPatch(
 	} catch (error) {
 		const applied = files.join(", ") || "none";
 		const message = error instanceof Error ? error.message : String(error);
-		await restoreSnapshots([...snapshots.values()]);
-		throw new Error(
-			`${message}\nPartial apply rolled back. Completed before failure: ${applied}.`,
-		);
+		let rollbackFailure: string | undefined;
+		try {
+			await restoreSnapshots([...snapshots.values()]);
+		} catch (rollbackError) {
+			rollbackFailure = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+		}
+		const rollbackStatus = rollbackFailure
+			? `Rollback encountered an additional error: ${rollbackFailure}`
+			: "Partial apply rolled back.";
+		throw new Error(`${message}\n${rollbackStatus} Completed before failure: ${applied}.`);
 	}
 
 	return {

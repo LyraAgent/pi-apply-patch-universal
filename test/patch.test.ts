@@ -53,6 +53,19 @@ describe("generateNumberedDiff", () => {
 			" 1 c1\n 2 c2\n-3 old\n+3 new1\n+4 new2\n 4 c3\n 5 c4",
 		);
 	});
+
+	it("uses bounded memory for large numbered diffs", () => {
+		const oldLines = Array.from({ length: 1_100 }, (_, index) => `line ${index + 1}`);
+		const newLines = [...oldLines];
+		newLines[549] = "line 550 updated";
+
+		const diff = generateNumberedDiff(oldLines.join("\n"), newLines.join("\n"), 2);
+		assert.equal(diff.firstChangedLine, 550);
+		assert.ok(diff.diff.includes("- 550 line 550"));
+		assert.ok(diff.diff.includes("+ 550 line 550 updated"));
+		assert.ok(diff.diff.includes(" 549 line 549"));
+		assert.ok(diff.diff.includes(" 551 line 551"));
+	});
 });
 
 describe("parseApplyPatch", () => {

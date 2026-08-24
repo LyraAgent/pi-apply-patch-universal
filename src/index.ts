@@ -24,7 +24,7 @@ const NATIVE_EDIT_TOOLS = ["edit", "write"] as const;
 const APPLY_PATCH_PARAMS = Type.Object({
 	input: Type.String({
 		description:
-			"The entire contents of the apply_patch command beginning with '*** Begin Patch' and ending with '*** End Patch'. Every line in '*** Add File: <path>' MUST start with '+'. In '*** Update File: <path>', use '@@' context blocks, ' ' for unchanged context, '-' for deletions, and '+' for additions.",
+			"Complete Codex-style patch text from '*** Begin Patch' through '*** End Patch'. Use '*** Add File:', '*** Update File:', or '*** Delete File:' headers. In Add File, prefix every content line (including blank lines) with '+'. In Update File hunks, prefix unchanged, removed, and added lines with ' ', '-', and '+' respectively.",
 	}),
 });
 
@@ -119,7 +119,7 @@ export default function piApplyPatch(pi: ExtensionAPI) {
 		name: "apply_patch",
 		label: "Apply Patch",
 		description:
-			"Apply a Codex-style multi-file patch to create, modify, or delete files. Input must start with '*** Begin Patch' and end with '*** End Patch'.\n\nRules:\n- Add File: each line of content MUST begin with '+' (e.g. +code)\n- Update File: use @@ context markers, ' ' for unchanged lines, '-' for deletions, '+' for additions\n- Delete File: *** Delete File: <path>\n- Move/Rename: *** Update File: <old> followed by *** Move to: <new>\n\nExample:\n*** Begin Patch\n*** Add File: src/new.py\n+def hello():\n+    print('hello')\n*** Update File: src/main.py\n@@ def run():\n-    old()\n+    hello()\n*** Delete File: obsolete.py\n*** End Patch",
+			"Apply one atomic Codex-style patch across multiple files. Paths are relative to the current working directory unless absolute paths are enabled.\n\nFormat:\n- Wrap all operations in '*** Begin Patch' and '*** End Patch'.\n- Add: '*** Add File: <path>'; prefix every content line, including blank lines, with '+'.\n- Update: '*** Update File: <path>'; use one or more '@@' hunks with space-prefixed context, '-' removals, and '+' additions. '@@ <existing line>' narrows the hunk search to after that line; standard '@@ -L,N +L,N @@' ranges are also accepted.\n- Move: place '*** Move to: <new path>' immediately after an Update File header.\n- Delete: '*** Delete File: <path>' with no body.\n- Optional '*** End of File' makes the preceding hunk prefer the file end.\n- Do not target one path more than once. Add and Move destinations must not already exist.\n\nExample:\n*** Begin Patch\n*** Add File: src/new.py\n+def hello():\n+    print('hello')\n*** Update File: src/main.py\n@@ def run():\n-    old()\n+    hello()\n*** Delete File: obsolete.py\n*** End Patch",
 		parameters: APPLY_PATCH_PARAMS,
 		renderCall(args, theme) {
 			const input = typeof args?.input === "string" ? args.input : "";
