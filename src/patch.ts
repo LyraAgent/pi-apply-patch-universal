@@ -21,9 +21,17 @@ export interface PatchAction {
 	hunks: PatchHunk[];
 }
 
+/**
+ * What to do when '*** Add File:' targets a path that already exists on disk.
+ * - "overwrite": replace the file content (identical content is a no-op).
+ * - "error": refuse and explain how to use Update File / Delete File instead.
+ */
+export type AddFileOnExisting = "overwrite" | "error";
+
 export interface ApplyPatchOptions {
 	cwd: string;
 	allowAbsolutePaths?: boolean;
+	addFileOnExisting?: AddFileOnExisting;
 }
 
 export interface ApplyPatchFileDiff {
@@ -63,18 +71,37 @@ export interface ApplyPatchResult {
 	diff: string;
 }
 
+const BEGIN_MARKER = "*** Begin Patch";
+const END_MARKER = "*** End Patch";
+/** '*** End Patch' that was mistakenly given a diff prefix, e.g. '+*** End Patch'. */
+const PREFIXED_END_MARKER = /^\s*[+\-]\s*\*\*\* End Patch\s*$/;
+
 function normalizePatchText(input: string): string[] {
-	let text = input.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-	// Strip markdown code fences if model wrapped the patch in ```...```
-	const beginIdx = text.indexOf("*** Begin Patch");
-	if (beginIdx >= 0) {
-		text = text.slice(beginIdx);
+	const lines = input.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+
+	// Strip prose or markdown fences before '*** Begin Patch'.
+	const beginIndex = lines.findIndex((line) => line.includes(BEGIN_MARKER));
+	const body = beginIndex >= 0 ? lines.slice(beginIndex) : [...lines];
+	if (beginIndex >= 0) {
+		const beginLine = body[0]!;
+		body[0] = beginLine.slice(beginLine.indexOf(BEGIN_MARKER));
 	}
-	const endIdx = text.indexOf("*** End Patch");
-	if (endIdx >= 0) {
-		text = text.slice(0, endIdx + "*** End Patch".length);
+
+	// Prefer the first well-formed standalone end marker.
+	let endIndex = body.findIndex((line, index) => index > 0 && line.trim().startsWith(END_MARKER));
+	if (endIndex < 0) {
+		// Tolerate '+*** End Patch': without this the marker is parsed as a content
+		// line and written into the target file. Scan from the end so file bodies that
+		// legitimately contain the marker text keep it verbatim.
+		for (let index = body.length - 1; index > 0; index--) {
+			if (PREFIXED_END_MARKER.test(body[index]!)) {
+				endIndex = index;
+				break;
+			}
+		}
 	}
-	return text.split("\n");
+	if (endIndex > 0) return [...body.slice(0, endIndex), END_MARKER];
+	return body;
 }
 
 function parseHeader(line: string): { kind: PatchActionKind; path: string } | undefined {
@@ -685,6 +712,15 @@ async function snapshotPath(absolutePath: string): Promise<FileSnapshot> {
 	}
 }
 
+async function readExistingFile(absolutePath: string): Promise<string | undefined> {
+	try {
+		return await readFile(absolutePath, "utf8");
+	} catch (error) {
+		if (isMissingPathError(error)) return undefined;
+		throw error;
+	}
+}
+
 function pathEntryExists(absolutePath: string): boolean {
 	try {
 		lstatSync(absolutePath);
@@ -950,6 +986,7 @@ export async function applyPatch(
 ): Promise<ApplyPatchResult> {
 	const parsed = parseApplyPatch(input);
 	validateActionPathConflicts(parsed.actions, options);
+	const addFileOnExisting: AddFileOnExisting = options.addFileOnExisting ?? "overwrite";
 	const files: string[] = [];
 	const fileDiffs: ApplyPatchFileDiff[] = [];
 	const snapshots = new Map<string, FileSnapshot>();
@@ -993,35 +1030,34 @@ export async function applyPatch(
 			if (action.kind === "add") {
 				const absolutePath = resolvePatchPath(action.path, options);
 				const newContent = addText(action);
-				await mkdir(dirname(absolutePath), { recursive: true });
-				try {
-					await writeFile(absolutePath, newContent, { encoding: "utf8", flag: "wx" });
-				} catch (error) {
-					if (
-						typeof error === "object" &&
-						error !== null &&
-						"code" in error &&
-						(error as NodeJS.ErrnoException).code === "EEXIST"
-					) {
-						throw new Error(`Add File refuses to overwrite existing path: ${action.path}`);
-					}
-					throw error;
+				const existingContent = await readExistingFile(absolutePath);
+				if (existingContent !== undefined && addFileOnExisting === "error") {
+					throw new Error(
+						`Add File refuses to overwrite existing path: ${action.path}\n` +
+							"Use '*** Update File:' to modify it, '*** Delete File:' first to replace it, " +
+							'or set "addFileOnExisting": "overwrite" in the apply_patch config.',
+					);
 				}
+				await mkdir(dirname(absolutePath), { recursive: true });
+				await writeFile(absolutePath, newContent, "utf8");
 				files.push(action.path);
+				const oldContent = existingContent ?? "";
+				const diffResult = generateNumberedDiff(normalizeText(oldContent), newContent);
 				const added = action.hunks.reduce(
 					(sum, h) => sum + h.lines.filter((l) => l.startsWith("+")).length,
 					0,
 				);
-				const diffResult = generateNumberedDiff("", newContent);
+				const removed = countContentLines(normalizeText(oldContent));
 				fileDiffs.push({
 					path: action.path,
 					operation: "add",
 					added,
-					removed: 0,
+					removed,
 					diff: diffResult.diff,
 					firstChangedLine: diffResult.firstChangedLine,
 				});
 				progressFile.added = added;
+				progressFile.removed = removed;
 				progressFile.done = true;
 				emitProgress(opIndex + 1, opIndex);
 				continue;

@@ -14,6 +14,7 @@ Works seamlessly with Claude, Gemini, DeepSeek, GPT, and custom API relays.
 - **Interactive TUI Configuration**: Manage active providers and models with `/apply-patch`.
 - **Native Edit Protection**: Automatically hides and blocks native `edit`/`write` tools when active, and restores them when switching away.
 - **Path Sandbox**: Restricts patch operations to the current workspace by default (`allowAbsolutePaths: false`).
+- **Forgiving Markers**: Auto-corrects a mis-prefixed `+*** End Patch` so the marker is never written into your file.
 - **Standard JSON Tool Calling**: Full compatibility with OpenAI-compatible proxies and aggregators (One-API, New-API, CLIProxy).
 
 ## Installation
@@ -44,7 +45,8 @@ Settings are persisted in `~/.pi/agent/pi-apply-patch.json`. You can also create
   "providers": ["cliproxy", "openai"],
   "models": ["anthropic/claude-3-7-sonnet"],
   "disableNativeEdit": true,
-  "allowAbsolutePaths": false
+  "allowAbsolutePaths": false,
+  "addFileOnExisting": "overwrite"
 }
 ```
 
@@ -56,6 +58,7 @@ Settings are persisted in `~/.pi/agent/pi-apply-patch.json`. You can also create
 | `models` | `string[]` | `[]` | **Model-level granular matching**. Enables `apply_patch` for specific models. Accepts full reference `provider/model_id` (e.g., `"openai/gpt-4o"`), bare `model_id`, or `provider:model_id`. Useful for enabling patch mode only on top-tier coding models while keeping others on standard tools. |
 | `disableNativeEdit` | `boolean` | `true` | **Tool exclusivity policy**. When `true`, hides and blocks built-in `edit` and `write` tools whenever `apply_patch` is active, compelling the LLM to use token-efficient diff patches and avoiding accidental full-file rewrites. Switching to non-target models automatically restores native tools. Set to `false` to keep all tools available concurrently. |
 | `allowAbsolutePaths` | `boolean` | `false` | **Path traversal sandbox**. When `false` (recommended), strictly restricts all patch operations within the current working directory (`cwd`) to prevent accidental edits outside your project root. Set to `true` only if you explicitly need cross-directory patch operations. |
+| `addFileOnExisting` | `"overwrite" \| "error"` | `"overwrite"` | **Add File collision policy**. `"overwrite"` lets `*** Add File:` replace a file that already exists (common when a previous run left a half-written file behind); the resulting diff shows the replaced lines and rollback restores the original content if a later action in the same patch fails. `"error"` restores the strict Codex behavior and fails with guidance to use `*** Update File:` or `*** Delete File:` instead. |
 
 #### Activation Logic
 - A model is **active** if it matches any entry in `models` **OR** its provider is in `providers`.
@@ -75,6 +78,8 @@ Settings are persisted in `~/.pi/agent/pi-apply-patch.json`. You can also create
 *** Delete File: obsolete.txt
 *** End Patch
 ```
+
+`*** Begin Patch` and `*** End Patch` must stand alone on their own lines. A stray diff prefix (`+*** End Patch`) is auto-corrected instead of being written into the target file, but only when no correctly formatted end marker is present — file bodies that legitimately contain the marker text are preserved.
 
 ## Acknowledgements
 

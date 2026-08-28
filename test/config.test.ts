@@ -9,6 +9,15 @@ describe("config & model matching", () => {
 		assert.deepEqual(cfg.models, []);
 		assert.equal(cfg.disableNativeEdit, true);
 		assert.equal(cfg.allowAbsolutePaths, false);
+		assert.equal(cfg.addFileOnExisting, "overwrite");
+	});
+
+	it("accepts only known addFileOnExisting values", () => {
+		assert.equal(normalizeConfig({ addFileOnExisting: "error" }).addFileOnExisting, "error");
+		assert.equal(
+			normalizeConfig({ addFileOnExisting: "nonsense" as never }).addFileOnExisting,
+			"overwrite",
+		);
 	});
 
 	it("returns false for all models when config is empty", () => {

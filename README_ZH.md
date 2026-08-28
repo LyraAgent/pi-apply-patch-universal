@@ -14,6 +14,7 @@
 - **交互式配置面板**：在终端输入 `/apply-patch` 即可图形化勾选启用的渠道与模型。
 - **原生工具智能屏蔽与还原**：激活时可选隐藏并拦截原生 `edit`/`write` 工具；切回未配置模型时自动无缝还原。
 - **工作区安全防护**：默认禁止补丁路径逃逸出当前工作区（`allowAbsolutePaths: false`）。
+- **标记容错**：误写成 `+*** End Patch` 时自动纠正，绝不会把结束标记当成正文写进目标文件。
 - **标准 JSON 工具协议**：采用标准 JSON 函数调用格式，100% 兼容不支持流式 Lark 语法的各类中转站与代理。
 
 ## 安装
@@ -44,7 +45,8 @@ pi install git:github.com/LyraAgent/pi-apply-patch-universal
   "providers": ["cliproxy", "openai"],
   "models": ["anthropic/claude-3-7-sonnet"],
   "disableNativeEdit": true,
-  "allowAbsolutePaths": false
+  "allowAbsolutePaths": false,
+  "addFileOnExisting": "overwrite"
 }
 ```
 
@@ -56,6 +58,7 @@ pi install git:github.com/LyraAgent/pi-apply-patch-universal
 | `models` | `string[]` | `[]` | **按模型精准开启**。针对特定高智商模型单独启用。支持 `provider/model_id`（如 `"cliproxy/claude-sonnet-4-6"`）、裸 `model_id` 或 `provider:model_id` 格式。适合在同一渠道下仅给强力代码模型开启补丁能力。 |
 | `disableNativeEdit` | `boolean` | `true` | **原生工具智能屏蔽与保护**。为 `true` 时，在当前模型激活 `apply_patch` 期间，自动隐藏并拦截原生的 `edit` 和 `write` 工具，强迫大模型统一使用极省 Token 的局部增量 Diff，彻底杜绝模型偷懒全文件重写；切回未配置模型时自动无缝还原。设为 `false` 则三者共存。 |
 | `allowAbsolutePaths` | `boolean` | `false` | **工作区路径沙箱防护**。为 `false`（推荐）时，所有补丁操作严格限制在当前工作区目录（`cwd`）内部，防止大模型因相对路径逃逸或绝对路径误改系统敏感文件。仅在确需跨目录修改项目外文件时设为 `true`。 |
+| `addFileOnExisting` | `"overwrite" \| "error"` | `"overwrite"` | **新增文件冲突策略**。为 `"overwrite"` 时，`*** Add File:` 允许覆盖已存在的同名文件（常见于上一次运行留下的半截文件）；覆盖会在 diff 中如实展示被替换的行，且同一补丁中后续操作失败时会回滚还原原始内容。设为 `"error"` 则恢复 Codex 严格行为，报错并提示改用 `*** Update File:` 或 `*** Delete File:`。 |
 
 #### 匹配规则
 - **激活条件（或关系）**：当前模型的 Provider 命中 `providers` 列表，**或** 模型 ID 命中 `models` 列表。
@@ -75,6 +78,8 @@ pi install git:github.com/LyraAgent/pi-apply-patch-universal
 *** Delete File: obsolete.txt
 *** End Patch
 ```
+
+`*** Begin Patch` 与 `*** End Patch` 必须独占一行。若误写成带前缀的 `+*** End Patch`，解析器会自动纠正，而不会把该行写进目标文件；仅当补丁中不存在格式正确的结束标记时才启用该纠错，因此正文中确实包含该标记文本的文件不会被误伤。
 
 ## 致谢
 

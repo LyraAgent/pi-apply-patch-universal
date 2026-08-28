@@ -194,6 +194,40 @@ export interface User {
 		);
 	});
 
+	it("tolerates a '+' prefixed end marker instead of writing it into the file", async () => {
+		const cwd = await makeTempDir();
+
+		const result = await applyPatch(
+			`*** Begin Patch
+*** Add File: generate.py
++print("hello")
++*** End Patch`,
+			{ cwd },
+		);
+
+		assert.equal(result.filesChanged, 1);
+		assert.equal(await readFile(path.join(cwd, "generate.py"), "utf8"), 'print("hello")\n');
+	});
+
+	it("keeps literal end-marker text inside file bodies when a real end marker follows", async () => {
+		const cwd = await makeTempDir();
+
+		const result = await applyPatch(
+			`*** Begin Patch
+*** Add File: docs.md
++Finish patches with:
++*** End Patch
+*** End Patch`,
+			{ cwd },
+		);
+
+		assert.equal(result.filesChanged, 1);
+		assert.equal(
+			await readFile(path.join(cwd, "docs.md"), "utf8"),
+			"Finish patches with:\n*** End Patch\n",
+		);
+	});
+
 	it("tolerates markdown code fences wrapping the patch", async () => {
 		const cwd = await makeTempDir();
 		await writeFile(path.join(cwd, "test.txt"), "hello world\n", "utf8");

@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import type { AddFileOnExisting } from "./patch.js";
 
 export type ApplyPatchConfig = {
 	/** Enable for these provider ids (e.g. "aio"). */
@@ -11,6 +12,8 @@ export type ApplyPatchConfig = {
 	disableNativeEdit: boolean;
 	/** Allow patch paths outside cwd. Default false. */
 	allowAbsolutePaths: boolean;
+	/** '*** Add File:' on an existing path: overwrite it or fail. Default "overwrite". */
+	addFileOnExisting: AddFileOnExisting;
 };
 
 export const DEFAULT_CONFIG: ApplyPatchConfig = {
@@ -18,6 +21,7 @@ export const DEFAULT_CONFIG: ApplyPatchConfig = {
 	models: [],
 	disableNativeEdit: true,
 	allowAbsolutePaths: false,
+	addFileOnExisting: "overwrite",
 };
 
 const LEGACY_CONFIG_PATH = join(homedir(), ".pi", "agent", "configurable-apply-patch.json");
@@ -35,6 +39,7 @@ export function normalizeConfig(raw: Partial<ApplyPatchConfig> | null | undefine
 		models: asStringList(raw?.models),
 		disableNativeEdit: raw?.disableNativeEdit !== false,
 		allowAbsolutePaths: raw?.allowAbsolutePaths === true,
+		addFileOnExisting: raw?.addFileOnExisting === "error" ? "error" : "overwrite",
 	};
 }
 
@@ -126,6 +131,7 @@ export function formatConfigSummary(config: ApplyPatchConfig): string {
 		`models: ${models}`,
 		`disableNativeEdit: ${config.disableNativeEdit}`,
 		`allowAbsolutePaths: ${config.allowAbsolutePaths}`,
+		`addFileOnExisting: ${config.addFileOnExisting}`,
 		`config: ${CONFIG_PATH}`,
 	].join("\n");
 }

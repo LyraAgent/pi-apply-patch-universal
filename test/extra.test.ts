@@ -463,9 +463,44 @@ describe("advanced patch resilience & diagnostics", () => {
 		assert.equal(await readFile(path.join(cwd, "insert.txt"), "utf8"), "one\ntwo\ninserted\nthree\n");
 	});
 
-	it("refuses to overwrite existing Add File and Move targets", async () => {
+	it("overwrites an existing Add File target by default and refuses in error mode", async () => {
 		const cwd = await makeTempDir();
-		await writeFile(path.join(cwd, "existing.txt"), "keep add target\n", "utf8");
+		await writeFile(path.join(cwd, "existing.txt"), "stale half-written file\n", "utf8");
+
+		const result = await applyPatch(
+			[
+				"*** Begin Patch",
+				"*** Add File: existing.txt",
+				"+replacement",
+				"*** End Patch",
+			].join("\n"),
+			{ cwd },
+		);
+		assert.equal(await readFile(path.join(cwd, "existing.txt"), "utf8"), "replacement\n");
+		const addDiff = result.fileDiffs[0]!;
+		assert.equal(addDiff.operation, "add");
+		assert.equal(addDiff.added, 1);
+		assert.equal(addDiff.removed, 1);
+
+		await assert.rejects(
+			applyPatch(
+				[
+					"*** Begin Patch",
+					"*** Add File: existing.txt",
+					"+second attempt",
+					"*** End Patch",
+				].join("\n"),
+				{ cwd, addFileOnExisting: "error" },
+			),
+			/Add File refuses to overwrite existing path[\s\S]*Update File/,
+		);
+		assert.equal(await readFile(path.join(cwd, "existing.txt"), "utf8"), "replacement\n");
+	});
+
+	it("rolls back an overwritten Add File target when a later action fails", async () => {
+		const cwd = await makeTempDir();
+		await writeFile(path.join(cwd, "existing.txt"), "original\n", "utf8");
+		await writeFile(path.join(cwd, "other.txt"), "other\n", "utf8");
 
 		await assert.rejects(
 			applyPatch(
@@ -473,14 +508,22 @@ describe("advanced patch resilience & diagnostics", () => {
 					"*** Begin Patch",
 					"*** Add File: existing.txt",
 					"+replacement",
+					"*** Update File: other.txt",
+					"@@",
+					"-missing context",
+					"+nope",
 					"*** End Patch",
 				].join("\n"),
 				{ cwd },
 			),
-			/Add File refuses to overwrite existing path/,
+			/Patch context not found/,
 		);
-		assert.equal(await readFile(path.join(cwd, "existing.txt"), "utf8"), "keep add target\n");
+		assert.equal(await readFile(path.join(cwd, "existing.txt"), "utf8"), "original\n");
+		assert.equal(await readFile(path.join(cwd, "other.txt"), "utf8"), "other\n");
+	});
 
+	it("refuses to overwrite an existing Move target", async () => {
+		const cwd = await makeTempDir();
 		await writeFile(path.join(cwd, "source.txt"), "source\n", "utf8");
 		await writeFile(path.join(cwd, "target.txt"), "keep move target\n", "utf8");
 		await assert.rejects(

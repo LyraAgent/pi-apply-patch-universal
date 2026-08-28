@@ -100,6 +100,7 @@ export async function openApplyPatchSettings(
 			`Models     (${config.models.length ? config.models.length + " selected" : "none"})`,
 			`disableNativeEdit   ${mark(config.disableNativeEdit)}  hide edit/write when active`,
 			`allowAbsolutePaths  ${mark(config.allowAbsolutePaths)}  allow paths outside cwd`,
+			`addFileOnExisting   ${config.addFileOnExisting}  Add File on an existing path`,
 			"Show config path / summary",
 			"Clear all targets",
 			"Done",
@@ -125,6 +126,15 @@ export async function openApplyPatchSettings(
 		}
 		if (pick.startsWith("allowAbsolutePaths")) {
 			config = { ...config, allowAbsolutePaths: !config.allowAbsolutePaths };
+			saveConfig(config);
+			onSaved?.(config);
+			continue;
+		}
+		if (pick.startsWith("addFileOnExisting")) {
+			config = {
+				...config,
+				addFileOnExisting: config.addFileOnExisting === "overwrite" ? "error" : "overwrite",
+			};
 			saveConfig(config);
 			onSaved?.(config);
 			continue;

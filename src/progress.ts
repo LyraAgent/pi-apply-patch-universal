@@ -53,6 +53,8 @@ export function parseApplyPatchInputProgress(input: string): ApplyPatchInputProg
 			continue;
 		}
 
+		// A '+' or '-' prefixed end marker is also treated as the end here; `includes`
+		// covers it, matching the tolerant behavior of the real parser.
 		if (line.trim() === END || line.includes(END)) {
 			ended = true;
 			break;

@@ -24,7 +24,7 @@ const NATIVE_EDIT_TOOLS = ["edit", "write"] as const;
 const APPLY_PATCH_PARAMS = Type.Object({
 	input: Type.String({
 		description:
-			"Complete Codex-style patch text from '*** Begin Patch' through '*** End Patch'. Use '*** Add File:', '*** Update File:', or '*** Delete File:' headers. In Add File, prefix every content line (including blank lines) with '+'. In Update File hunks, prefix unchanged, removed, and added lines with ' ', '-', and '+' respectively.",
+			"Complete Codex-style patch text from '*** Begin Patch' through '*** End Patch'. Use '*** Add File:', '*** Update File:', or '*** Delete File:' headers. In Add File, prefix every content line (including blank lines) with '+'. In Update File hunks, prefix unchanged, removed, and added lines with ' ', '-', and '+' respectively. '*** End Patch' must stand alone on its own line with no '+' or '-' prefix.",
 	}),
 });
 
@@ -119,7 +119,7 @@ export default function piApplyPatch(pi: ExtensionAPI) {
 		name: "apply_patch",
 		label: "Apply Patch",
 		description:
-			"Apply one atomic Codex-style patch across multiple files. Paths are relative to the current working directory unless absolute paths are enabled.\n\nFormat:\n- Wrap all operations in '*** Begin Patch' and '*** End Patch'.\n- Add: '*** Add File: <path>'; prefix every content line, including blank lines, with '+'.\n- Update: '*** Update File: <path>'; use one or more '@@' hunks with space-prefixed context, '-' removals, and '+' additions. '@@ <existing line>' narrows the hunk search to after that line; standard '@@ -L,N +L,N @@' ranges are also accepted.\n- Move: place '*** Move to: <new path>' immediately after an Update File header.\n- Delete: '*** Delete File: <path>' with no body.\n- Optional '*** End of File' makes the preceding hunk prefer the file end.\n- Do not target one path more than once. Add and Move destinations must not already exist.\n\nExample:\n*** Begin Patch\n*** Add File: src/new.py\n+def hello():\n+    print('hello')\n*** Update File: src/main.py\n@@ def run():\n-    old()\n+    hello()\n*** Delete File: obsolete.py\n*** End Patch",
+			"Apply one atomic Codex-style patch across multiple files. Paths are relative to the current working directory unless absolute paths are enabled.\n\nFormat:\n- Wrap all operations in '*** Begin Patch' and '*** End Patch'. Both markers must stand alone on their own line, never prefixed with '+' or '-'.\n- Add: '*** Add File: <path>'; prefix every content line, including blank lines, with '+'. By default an existing file at that path is overwritten; configure addFileOnExisting to make it an error instead.\n- Update: '*** Update File: <path>'; use one or more '@@' hunks with space-prefixed context, '-' removals, and '+' additions. '@@ <existing line>' narrows the hunk search to after that line; standard '@@ -L,N +L,N @@' ranges are also accepted.\n- Move: place '*** Move to: <new path>' immediately after an Update File header.\n- Delete: '*** Delete File: <path>' with no body.\n- Optional '*** End of File' makes the preceding hunk prefer the file end.\n- Do not target one path more than once. Move destinations must not already exist.\n\nExample:\n*** Begin Patch\n*** Add File: src/new.py\n+def hello():\n+    print('hello')\n*** Update File: src/main.py\n@@ def run():\n-    old()\n+    hello()\n*** Delete File: obsolete.py\n*** End Patch",
 		parameters: APPLY_PATCH_PARAMS,
 		renderCall(args, theme) {
 			const input = typeof args?.input === "string" ? args.input : "";
@@ -199,6 +199,7 @@ export default function piApplyPatch(pi: ExtensionAPI) {
 				{
 					cwd: ctx.cwd,
 					allowAbsolutePaths: config.allowAbsolutePaths,
+					addFileOnExisting: config.addFileOnExisting,
 				},
 				(progress) => {
 					onUpdate?.({
