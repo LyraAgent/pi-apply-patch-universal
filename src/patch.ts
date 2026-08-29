@@ -104,15 +104,63 @@ function normalizePatchText(input: string): string[] {
 	return body;
 }
 
-function parseHeader(line: string): { kind: PatchActionKind; path: string } | undefined {
-	const match = line.match(/^\*\*\* (Add|Update|Delete|Create|Remove) (?:File:?|to:?)\s*(.+)$/i);
-	if (!match) return undefined;
-	let kindRaw = match[1]!.toLowerCase();
+/**
+ * File headers are matched tolerantly: models routinely emit a leading indent,
+ * a missing or repeated space after '***', extra asterisks, a space before the
+ * colon, or a stray '+'/'-' diff prefix. Rejecting those variants is not a
+ * harmless strictness, because an unrecognized header is absorbed into the
+ * previous file's hunks and its body is then searched in the wrong file.
+ */
+const FILE_HEADER_PATTERN =
+	/^(?<prefix>\s*[+-]\s*|\s+)?\*{3,}\s*(?<kind>Add|Update|Delete|Create|Remove)(?:\s+(?:File|to))?\s*:?\s*(?<path>.+)$/i;
+
+interface ParsedFileHeader {
+	kind: PatchActionKind;
+	path: string;
+	/** True when the header carried a '+'/'-' diff prefix, which is ambiguous with file content. */
+	prefixed: boolean;
+}
+
+function parseFileHeader(line: string): ParsedFileHeader | undefined {
+	const match = line.match(FILE_HEADER_PATTERN);
+	if (!match?.groups) return undefined;
+	const kindRaw = match.groups.kind!.toLowerCase();
 	let kind: PatchActionKind;
 	if (kindRaw === "create" || kindRaw === "add") kind = "add";
 	else if (kindRaw === "delete" || kindRaw === "remove") kind = "delete";
 	else kind = "update";
-	return { kind, path: cleanPatchPath(match[2]!) };
+	const prefix = match.groups.prefix ?? "";
+	return {
+		kind,
+		path: cleanPatchPath(match.groups.path!),
+		prefixed: /[+-]/.test(prefix),
+	};
+}
+
+function parseHeader(line: string): { kind: PatchActionKind; path: string } | undefined {
+	const parsed = parseFileHeader(line);
+	return parsed ? { kind: parsed.kind, path: parsed.path } : undefined;
+}
+
+function nextMeaningfulLine(lines: string[], from: number): string | undefined {
+	for (let i = from; i < lines.length; i++) {
+		if (lines[i]!.trim() !== "") return lines[i];
+	}
+	return undefined;
+}
+
+/**
+ * A '+'/'-' prefixed header is ambiguous: it may be a mis-prefixed header, or a
+ * literal line of documentation about patch syntax. Only treat it as a header
+ * when what follows cannot be file content, i.e. a new hunk or another header.
+ */
+function prefixedHeaderStartsNewFile(lines: string[], headerIndex: number): boolean {
+	const next = nextMeaningfulLine(lines, headerIndex + 1);
+	if (next === undefined) return false;
+	if (next.startsWith("@@")) return true;
+	if (next.trim() === END_MARKER) return false;
+	const nextHeader = parseFileHeader(next);
+	return nextHeader !== undefined && !nextHeader.prefixed;
 }
 
 export function parseHunkHeaderLineNumber(header?: string): number | undefined {
@@ -138,27 +186,40 @@ export function parseApplyPatch(input: string): { actions: PatchAction[] } {
 	const lines = normalizePatchText(input);
 	let index = 0;
 	while (index < lines.length && lines[index]!.trim() === "") index++;
-	if (!lines[index] || !lines[index]!.startsWith("*** Begin Patch")) {
+	if (!lines[index] || !lines[index]!.trim().startsWith(BEGIN_MARKER)) {
 		throw new Error("Patch must start with '*** Begin Patch'.");
 	}
 	index++;
+
+	/** Resolve whether the line at `at` opens a new file section. */
+	const headerAt = (at: number): ParsedFileHeader | undefined => {
+		const parsed = parseFileHeader(lines[at]!);
+		if (!parsed) return undefined;
+		if (parsed.prefixed && !prefixedHeaderStartsNewFile(lines, at)) return undefined;
+		return parsed;
+	};
 
 	const actions: PatchAction[] = [];
 	let sawEnd = false;
 	while (index < lines.length) {
 		const line = lines[index]!;
-		if (line.trim() === "*** End Patch") {
+		if (line.trim() === END_MARKER) {
 			sawEnd = true;
 			break;
 		}
-		const header = parseHeader(line);
+		if (line.trim() === "") {
+			index++;
+			continue;
+		}
+		const header = headerAt(index);
 		if (!header || !header.path) throw new Error(`Expected patch file header at line ${index + 1}.`);
 		const action: PatchAction = { kind: header.kind, path: header.path, hunks: [] };
 		let current: PatchHunk = { lines: [] };
 		index++;
 		while (index < lines.length) {
 			const bodyLine = lines[index]!;
-			if (bodyLine.trim() === "*** End Patch" || parseHeader(bodyLine)) break;
+			// A new file header always closes the current file's hunks.
+			if (bodyLine.trim() === END_MARKER || headerAt(index)) break;
 			if (bodyLine === "*** End of File" || bodyLine.startsWith("*** End of File")) {
 				current.endOfFile = true;
 				index++;
@@ -235,6 +296,7 @@ export function cleanPatchPath(pathValue: string): string {
 	) {
 		cleaned = cleaned.slice(1, -1);
 	}
+	if (cleaned.startsWith("`") && cleaned.endsWith("`")) cleaned = cleaned.slice(1, -1).trim();
 	if (cleaned.startsWith("@")) cleaned = cleaned.slice(1);
 	cleaned = cleaned.replace(/\\/g, "/");
 	return cleaned;
@@ -527,15 +589,119 @@ function findChangeContextEnd(
 	return undefined;
 }
 
+function isNonAnchorLine(text: string): boolean {
+	const trimmed = text.trim();
+	if (trimmed === "") return true;
+	// Comment-only lines in the common curly/hash/dash families. Models frequently
+	// paraphrase or truncate doc comments, so these make poor match anchors.
+	return /^(?:\/\/|\/\*|\*\/|\*|#|--|<!--|-->)/.test(trimmed);
+}
+
+/**
+ * Last-resort alignment used only after every strict pass has failed.
+ *
+ * Models routinely paraphrase or truncate doc comments in the context they
+ * quote, which makes a strictly contiguous match impossible even though the
+ * surrounding code is unambiguous. This pass matches only "anchor" lines (real
+ * code) and tolerates comment/blank lines that exist on just one side:
+ * file-only comments are preserved verbatim, patch-only comments are dropped.
+ * Anchors must still match exactly, and the caller enforces uniqueness, so a
+ * paraphrased comment can no longer relocate an edit to the wrong code.
+ */
+function alignHunkLoosely(
+	fileLines: string[],
+	subHunkLines: string[],
+	start: number,
+): { end: number; replacement: string[]; droppedRemovals: string[] } | undefined {
+	const eq = (a: string, b: string) => normalizeLineForMatch(a, 4) === normalizeLineForMatch(b, 4);
+	const replacement: string[] = [];
+	const droppedRemovals: string[] = [];
+	let i = start;
+
+	for (const rawLine of subHunkLines) {
+		const marker = rawLine[0];
+		const isAdd = marker === "+";
+		const isRemove = marker === "-";
+		const text =
+			marker === "+" || marker === "-" || marker === " " || marker === "?"
+				? rawLine.slice(1)
+				: rawLine;
+
+		if (isAdd) {
+			replacement.push(text);
+			continue;
+		}
+
+		const patchLineIsAnchor = !isNonAnchorLine(text);
+		// Keep comment/blank lines the file has but the patch omitted.
+		while (
+			patchLineIsAnchor &&
+			i < fileLines.length &&
+			!eq(fileLines[i]!, text) &&
+			isNonAnchorLine(fileLines[i]!)
+		) {
+			replacement.push(fileLines[i]!);
+			i++;
+		}
+
+		if (i < fileLines.length && eq(fileLines[i]!, text)) {
+			if (!isRemove) replacement.push(fileLines[i]!);
+			i++;
+			continue;
+		}
+
+		// Anchors carry the real meaning of the hunk and must match exactly.
+		if (patchLineIsAnchor) return undefined;
+
+		// A comment/blank line the patch quoted but the file does not have. Drop it
+		// rather than inventing content. A dropped '-' means the intended deletion
+		// did not happen, so it is reported instead of being applied silently.
+		if (isRemove) droppedRemovals.push(text);
+	}
+
+	return { end: i, replacement, droppedRemovals };
+}
+
+function findLooseHunkMatches(
+	fileLines: string[],
+	subHunkLines: string[],
+): Array<{ start: number; end: number; replacement: string[]; droppedRemovals: string[] }> {
+	const consumed = subHunkLines.filter((l) => !l.startsWith("+"));
+	const anchors = consumed.filter((l) => !isNonAnchorLine(l.slice(1)));
+	// Two anchors keep the match specific enough to trust without strict context.
+	if (anchors.length < 2) return [];
+
+	const normalizedFirstAnchor = normalizeLineForMatch(anchors[0]!.slice(1), 4);
+	const matches: Array<{
+		start: number;
+		end: number;
+		replacement: string[];
+		droppedRemovals: string[];
+	}> = [];
+	for (let start = 0; start < fileLines.length; start++) {
+		if (normalizeLineForMatch(fileLines[start]!, 4) !== normalizedFirstAnchor) continue;
+		// Alignment starts at the first anchor, so leading patch-only comment lines
+		// are dropped and leading file-only comment lines stay outside the range.
+		const aligned = alignHunkLoosely(fileLines, subHunkLines, start);
+		if (aligned) matches.push({ start, ...aligned });
+	}
+	return matches;
+}
+
 function applyHunkWithFuzz(
 	fileLines: string[],
 	hunk: PatchHunk,
 	cursor: number,
 	filePath: string,
 	hunkIndex: number,
+	lineOffset = 0,
 ): { nextLines: string[]; newCursor: number } {
 	const candidateLineSets = buildCandidateHunkLineSets(hunk.lines);
-	const hintLine = parseHunkHeaderLineNumber(hunk.header);
+	const rawHintLine = parseHunkHeaderLineNumber(hunk.header);
+	// Header line numbers describe the pre-patch file. Earlier hunks in the same
+	// file have already shifted every later line by their net size change, so the
+	// hint must be rebased or later hunks in a multi-hunk patch drift out of range.
+	const hintLine = rawHintLine === undefined ? undefined : Math.max(1, rawHintLine + lineOffset);
 	const changeContextEnd = findChangeContextEnd(fileLines, hunk.header, cursor);
 	const searchCursor = changeContextEnd ?? cursor;
 
@@ -568,7 +734,6 @@ function applyHunkWithFuzz(
 
 			const subHunkLines = candidateLines.slice(startIdx, endIdx);
 			const { oldChunk } = hunkToChunks(subHunkLines);
-
 			if (oldChunk.length === 0) {
 				const { newChunk } = hunkToChunks(subHunkLines);
 				const insertionHeader = hunk.header?.match(/-(\d+),0(?:\s|$)/);
@@ -676,6 +841,29 @@ function applyHunkWithFuzz(
 		}
 	}
 
+	// Every strict pass failed. Retry with comment/blank-line tolerance, requiring
+	// the anchor alignment to be unique so a paraphrased comment cannot silently
+	// move the edit somewhere else.
+	for (const candidateLines of candidateLineSets) {
+		const matches = findLooseHunkMatches(fileLines, candidateLines);
+		if (matches.length === 0) continue;
+		const forward = matches.filter((m) => m.start >= searchCursor);
+		const pool = forward.length > 0 ? forward : matches;
+		if (pool.length > 1) continue;
+		const match = pool[0]!;
+		if (match.droppedRemovals.length > 0) {
+			throw new Error(
+				`${generateHunkDiagnostic(fileLines, hunk, filePath, hunkIndex)}\n\n` +
+					"The surrounding code was located, but these '-' lines are not present in the file " +
+					`and would have been skipped:\n${match.droppedRemovals.map((l) => `  |- ${l}`).join("\n")}\n` +
+					"Re-read the file and quote the removed lines exactly.",
+			);
+		}
+		const nextLines = [...fileLines];
+		nextLines.splice(match.start, match.end - match.start, ...match.replacement);
+		return { nextLines, newCursor: match.start + match.replacement.length };
+	}
+
 	throw new Error(generateHunkDiagnostic(fileLines, hunk, filePath, hunkIndex));
 }
 
@@ -687,11 +875,16 @@ export function applyHunksToContent(
 	const normalized = normalizeText(originalContent);
 	let fileLines = normalized.length === 0 ? [] : normalized.split("\n");
 	let cursor = 0;
+	// Net lines added/removed by hunks already applied to this file. Header line
+	// numbers refer to the original file, so later hints need this correction.
+	let lineOffset = 0;
 
 	for (const [hunkIndex, hunk] of hunks.entries()) {
-		const result = applyHunkWithFuzz(fileLines, hunk, cursor, filePath, hunkIndex);
+		const before = fileLines.length;
+		const result = applyHunkWithFuzz(fileLines, hunk, cursor, filePath, hunkIndex, lineOffset);
 		fileLines = result.nextLines;
 		cursor = result.newCursor;
+		lineOffset += fileLines.length - before;
 	}
 
 	return fileLines.join("\n");
@@ -1133,7 +1326,6 @@ export async function applyPatch(
 			emitProgress(opIndex + 1, opIndex);
 		}
 	} catch (error) {
-		const applied = files.join(", ") || "none";
 		const message = error instanceof Error ? error.message : String(error);
 		let rollbackFailure: string | undefined;
 		try {
@@ -1141,10 +1333,20 @@ export async function applyPatch(
 		} catch (rollbackError) {
 			rollbackFailure = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
 		}
-		const rollbackStatus = rollbackFailure
-			? `Rollback encountered an additional error: ${rollbackFailure}`
-			: "Partial apply rolled back.";
-		throw new Error(`${message}\n${rollbackStatus} Completed before failure: ${applied}.`);
+		if (rollbackFailure) {
+			throw new Error(
+				`${message}\nRollback encountered an additional error: ${rollbackFailure} ` +
+					`Completed before failure: ${files.join(", ") || "none"}.`,
+			);
+		}
+		// The patch is atomic, so the caller needs to know which operations were fine:
+		// resend them unchanged and only rework the one that failed.
+		const reverted =
+			files.length > 0
+				? `Reverted ${files.length} operation${files.length === 1 ? "" : "s"} that had applied cleanly: ${files.join(", ")}. ` +
+					"Resend those unchanged and fix only the failing file."
+				: "No operation had been applied yet.";
+		throw new Error(`${message}\nPartial apply rolled back. ${reverted}`);
 	}
 
 	return {

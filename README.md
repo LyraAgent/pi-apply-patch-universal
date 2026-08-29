@@ -15,6 +15,9 @@ Works seamlessly with Claude, Gemini, DeepSeek, GPT, and custom API relays.
 - **Native Edit Protection**: Automatically hides and blocks native `edit`/`write` tools when active, and restores them when switching away.
 - **Path Sandbox**: Restricts patch operations to the current workspace by default (`allowAbsolutePaths: false`).
 - **Forgiving Markers**: Auto-corrects a mis-prefixed `+*** End Patch` so the marker is never written into your file.
+- **Tolerant File Headers**: `*** Update File:` and friends are recognized despite indentation, missing/extra spaces, extra asterisks, backticked paths, or a stray diff prefix — so a later file's hunks are never absorbed into the previous file.
+- **Drift-Corrected Line Hints**: `@@ -L,N @@` hints from later hunks are rebased by the net size change of earlier hunks in the same file, then verified by content, so multi-hunk patches do not drift.
+- **Comment-Tolerant Fallback**: When every strict pass fails, a final pass anchors on real code and tolerates paraphrased or truncated doc comments — but only when the alignment is unique, and it reports any `-` line it could not find instead of skipping it.
 - **Standard JSON Tool Calling**: Full compatibility with OpenAI-compatible proxies and aggregators (One-API, New-API, CLIProxy).
 
 ## Installation
@@ -80,6 +83,12 @@ Settings are persisted in `~/.pi/agent/pi-apply-patch.json`. You can also create
 ```
 
 `*** Begin Patch` and `*** End Patch` must stand alone on their own lines. A stray diff prefix (`+*** End Patch`) is auto-corrected instead of being written into the target file, but only when no correctly formatted end marker is present — file bodies that legitimately contain the marker text are preserved.
+
+### Matching behavior
+
+Hunks are located by content, not by trusting line numbers. `@@ -L,N +L,N @@` is treated as a hint: it is rebased by the net line change of earlier hunks in the same file, searched outward from there, and then falls back to a full-file scan. A hunk that only matches after ignoring comment differences is applied only when that alignment is unique in the file; comment lines the patch omitted are preserved, and a `-` line that cannot be found is reported rather than silently skipped.
+
+A patch is atomic: if any operation fails, every earlier operation is rolled back and the error lists which ones were reverted, so you can resend them unchanged and rework only the failing file.
 
 ## Acknowledgements
 

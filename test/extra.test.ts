@@ -733,3 +733,292 @@ describe("advanced patch resilience & diagnostics", () => {
 		assert.ok(updated.includes("item_150_value = 99999;"));
 	});
 });
+
+describe("multi-file header state machine", () => {
+	it("closes the previous file when a later header is indented or oddly spaced", async () => {
+		const cwd = await makeTempDir();
+		await mkdir(path.join(cwd, "src"), { recursive: true });
+		await writeFile(
+			path.join(cwd, "src", "site.css"),
+			".nav-brand {\n\tcolor: red;\n}\n",
+			"utf8",
+		);
+		await writeFile(
+			path.join(cwd, "src", "nav-tools.tsx"),
+			[
+				"export function NavTools() {",
+				"\treturn (",
+				"\t\t<button",
+				"\t\t\ttype=\"button\"",
+				"\t\t\taria-pressed={bgm.on}",
+				"\t\t/>",
+				"\t)",
+				"}",
+			].join("\n") + "\n",
+			"utf8",
+		);
+
+		// Second header is indented, which previously failed to match and made the
+		// TSX hunk get searched inside site.css.
+		const patchText = [
+			"*** Begin Patch",
+			"*** Update File: src/site.css",
+			"@@",
+			"-\tcolor: red;",
+			"+\tcolor: blue;",
+			"  *** Update File: src/nav-tools.tsx",
+			"@@",
+			" \t\t\ttype=\"button\"",
+			"-\t\t\taria-pressed={bgm.on}",
+			"+\t\t\taria-pressed={bgm.on}",
+			"+\t\t\tonClick={() => setBgmOn(!bgm.on)}",
+			"*** End " + "Patch",
+		].join("\n");
+
+		const result = await applyPatch(patchText, { cwd });
+		assert.equal(result.filesChanged, 2);
+		assert.ok(
+			(await readFile(path.join(cwd, "src", "site.css"), "utf8")).includes("color: blue;"),
+		);
+		assert.ok(
+			(await readFile(path.join(cwd, "src", "nav-tools.tsx"), "utf8")).includes(
+				"onClick={() => setBgmOn(!bgm.on)}",
+			),
+		);
+	});
+
+	it("accepts missing space, extra asterisks, and backticked paths in headers", async () => {
+		const cwd = await makeTempDir();
+		await writeFile(path.join(cwd, "a.txt"), "a\n", "utf8");
+		await writeFile(path.join(cwd, "b.txt"), "b\n", "utf8");
+		await writeFile(path.join(cwd, "c.txt"), "c\n", "utf8");
+
+		const result = await applyPatch(
+			[
+				"*** Begin Patch",
+				"***Update File: a.txt",
+				"@@",
+				"-a",
+				"+a2",
+				"**** Update File: `b.txt`",
+				"@@",
+				"-b",
+				"+b2",
+				"*** Update File : c.txt",
+				"@@",
+				"-c",
+				"+c2",
+				"*** End " + "Patch",
+			].join("\n"),
+			{ cwd },
+		);
+
+		assert.equal(result.filesChanged, 3);
+		assert.equal(await readFile(path.join(cwd, "a.txt"), "utf8"), "a2\n");
+		assert.equal(await readFile(path.join(cwd, "b.txt"), "utf8"), "b2\n");
+		assert.equal(await readFile(path.join(cwd, "c.txt"), "utf8"), "c2\n");
+	});
+
+	it("treats a prefixed header as content when it is part of a file body", async () => {
+		const cwd = await makeTempDir();
+
+		const result = await applyPatch(
+			[
+				"*** Begin Patch",
+				"*** Add File: guide.md",
+				"+Headers look like this:",
+				"+*** Update File: example.ts",
+				"+and they must stand alone.",
+				"*** End " + "Patch",
+			].join("\n"),
+			{ cwd },
+		);
+
+		assert.equal(result.filesChanged, 1);
+		assert.equal(
+			await readFile(path.join(cwd, "guide.md"), "utf8"),
+			"Headers look like this:\n*** Update File: example.ts\nand they must stand alone.\n",
+		);
+	});
+
+	it("tolerates blank lines between file sections", async () => {
+		const cwd = await makeTempDir();
+		await writeFile(path.join(cwd, "a.txt"), "a\n", "utf8");
+		await writeFile(path.join(cwd, "b.txt"), "b\n", "utf8");
+
+		const result = await applyPatch(
+			[
+				"*** Begin Patch",
+				"",
+				"*** Update File: a.txt",
+				"@@",
+				"-a",
+				"+a2",
+				"",
+				"*** Update File: b.txt",
+				"@@",
+				"-b",
+				"+b2",
+				"*** End " + "Patch",
+			].join("\n"),
+			{ cwd },
+		);
+
+		assert.equal(result.filesChanged, 2);
+		assert.equal(await readFile(path.join(cwd, "a.txt"), "utf8"), "a2\n");
+		assert.equal(await readFile(path.join(cwd, "b.txt"), "utf8"), "b2\n");
+	});
+});
+
+describe("line-number drift and comment tolerance", () => {
+	it("rebases later hunk line hints by the net size change of earlier hunks", async () => {
+		const cwd = await makeTempDir();
+		// Two identical blocks: only a correctly rebased hint picks the right one.
+		const lines: string[] = [];
+		for (let i = 1; i <= 40; i++) lines.push(`filler ${i}`);
+		lines.push("target();");
+		for (let i = 41; i <= 80; i++) lines.push(`filler ${i}`);
+		lines.push("target();");
+		for (let i = 81; i <= 100; i++) lines.push(`filler ${i}`);
+		await writeFile(path.join(cwd, "drift.ts"), lines.join("\n") + "\n", "utf8");
+
+		// Hunk 1 inserts 30 lines well before the second "target();" at line 82.
+		const inserted = Array.from({ length: 30 }, (_, i) => `+added ${i + 1}`);
+		const result = await applyPatch(
+			[
+				"*** Begin Patch",
+				"*** Update File: drift.ts",
+				"@@ -41,1 +41,31 @@",
+				"-target();",
+				"+target();",
+				...inserted,
+				// Header still uses original-file numbering for the second target.
+				"@@ -82,1 +112,1 @@",
+				"-target();",
+				"+target_second();",
+				"*** End " + "Patch",
+			].join("\n"),
+			{ cwd },
+		);
+
+		assert.equal(result.filesChanged, 1);
+		const updated = (await readFile(path.join(cwd, "drift.ts"), "utf8")).split("\n");
+		// The first target keeps its name; only the second one was renamed.
+		assert.equal(updated[40], "target();");
+		assert.equal(updated.filter((l) => l === "target_second();").length, 1);
+		assert.equal(updated.filter((l) => l === "target();").length, 1);
+		// The rename landed after the inserted block, i.e. at the second occurrence.
+		assert.ok(updated.indexOf("target_second();") > updated.indexOf("added 30"));
+	});
+
+	it("applies a hunk whose quoted doc comment is paraphrased or truncated", async () => {
+		const cwd = await makeTempDir();
+		await writeFile(
+			path.join(cwd, "store.ts"),
+			[
+				"/**",
+				" * 挂载时的整体排布。",
+				" * 负 delay 的意思是提前若干毫秒开始。",
+				" * 这一段注释模型没有完整抄下来。",
+				" */",
+				"function layout(items: Item[]) {",
+				"\treturn items;",
+				"}",
+			].join("\n") + "\n",
+			"utf8",
+		);
+
+		const result = await applyPatch(
+			[
+				"*** Begin Patch",
+				"*** Update File: store.ts",
+				"@@ -73,19 +76,33 @@",
+				" /**",
+				"  * 挂载时的整体排布。",
+				"  */",
+				" function layout(items: Item[]) {",
+				"-\treturn items;",
+				"+\treturn items.slice();",
+				" }",
+				"*** End " + "Patch",
+			].join("\n"),
+			{ cwd },
+		);
+
+		assert.equal(result.filesChanged, 1);
+		const updated = await readFile(path.join(cwd, "store.ts"), "utf8");
+		assert.ok(updated.includes("return items.slice();"));
+		// Comment lines the patch omitted are preserved, not deleted.
+		assert.ok(updated.includes(" * 负 delay 的意思是提前若干毫秒开始。"));
+		assert.ok(updated.includes(" * 这一段注释模型没有完整抄下来。"));
+	});
+
+	it("refuses comment-tolerant alignment when the anchors are ambiguous", async () => {
+		const cwd = await makeTempDir();
+		// The paraphrased comment sits too deep for edge fuzzing to drop, so only the
+		// comment-tolerant pass could match it - and it matches both blocks.
+		const block = [
+			"function f() {",
+			"\tconst a = 1;",
+			"\tconst b = 2;",
+			"\t// note about c",
+			"\tconst c = 3;",
+			"\treturn c;",
+			"}",
+		].join("\n");
+		await writeFile(path.join(cwd, "dup.ts"), `${block}\n\n${block}\n`, "utf8");
+
+		await assert.rejects(
+			applyPatch(
+				[
+					"*** Begin Patch",
+					"*** Update File: dup.ts",
+					"@@",
+					" function f() {",
+					" \tconst a = 1;",
+					" \tconst b = 2;",
+					" \t// paraphrased note about c",
+					" \tconst c = 3;",
+					"-\treturn c;",
+					"+\treturn c + 1;",
+					" }",
+					"*** End " + "Patch",
+				].join("\n"),
+				{ cwd },
+			),
+			/Patch context not found/,
+		);
+		assert.equal(await readFile(path.join(cwd, "dup.ts"), "utf8"), `${block}\n\n${block}\n`);
+	});
+
+	it("reports removal lines that comment-tolerant alignment could not find", async () => {
+		const cwd = await makeTempDir();
+		await writeFile(
+			path.join(cwd, "keep.ts"),
+			["function f() {", "\treturn 1;", "}"].join("\n") + "\n",
+			"utf8",
+		);
+
+		await assert.rejects(
+			applyPatch(
+				[
+					"*** Begin Patch",
+					"*** Update File: keep.ts",
+					"@@",
+					" function f() {",
+					"-\t// this comment does not exist in the file",
+					"-\treturn 1;",
+					"+\treturn 2;",
+					" }",
+					"*** End " + "Patch",
+				].join("\n"),
+				{ cwd },
+			),
+			/would have been skipped/,
+		);
+		assert.equal(
+			await readFile(path.join(cwd, "keep.ts"), "utf8"),
+			["function f() {", "\treturn 1;", "}"].join("\n") + "\n",
+		);
+	});
+});
