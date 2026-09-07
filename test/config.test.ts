@@ -33,24 +33,34 @@ describe("config & model matching", () => {
 		assert.equal(isTargetModel({ provider: "openai", id: "gpt-4o" }, cfg), false);
 	});
 
-	it("matches models by full ref, bare id, or colon format", () => {
-		const cfg = normalizeConfig({
-			providers: [],
-			models: [
-				"anthropic/claude-3-7-sonnet",
-				"gpt-4o",
-				"deepseek:deepseek-chat",
-			],
+		it("matches models by full ref, bare id, or colon format", () => {
+			const cfg = normalizeConfig({
+				providers: [],
+				models: [
+					"anthropic/claude-3-7-sonnet",
+					"gpt-4o",
+					"deepseek:deepseek-chat",
+				],
+			});
+
+			// Match by provider/id
+			assert.equal(isTargetModel({ provider: "anthropic", id: "claude-3-7-sonnet" }, cfg), true);
+			// Match by bare id
+			assert.equal(isTargetModel({ provider: "openai", id: "gpt-4o" }, cfg), true);
+			assert.equal(isTargetModel({ provider: "other-relay", id: "gpt-4o" }, cfg), true);
+			// Match by provider:id
+			assert.equal(isTargetModel({ provider: "deepseek", id: "deepseek-chat" }, cfg), true);
+			// Non-matching model
+			assert.equal(isTargetModel({ provider: "anthropic", id: "claude-3-5-haiku" }, cfg), false);
 		});
 
-		// Match by provider/id
-		assert.equal(isTargetModel({ provider: "anthropic", id: "claude-3-7-sonnet" }, cfg), true);
-		// Match by bare id
-		assert.equal(isTargetModel({ provider: "openai", id: "gpt-4o" }, cfg), true);
-		assert.equal(isTargetModel({ provider: "other-relay", id: "gpt-4o" }, cfg), true);
-		// Match by provider:id
-		assert.equal(isTargetModel({ provider: "deepseek", id: "deepseek-chat" }, cfg), true);
-		// Non-matching model
-		assert.equal(isTargetModel({ provider: "anthropic", id: "claude-3-5-haiku" }, cfg), false);
+		it("matches all models when wildcard '*' is configured in providers or models", () => {
+			const cfgProviders = normalizeConfig({ providers: ["*"], models: [] });
+			assert.equal(isTargetModel({ provider: "anthropic", id: "claude-3-7-sonnet" }, cfgProviders), true);
+			assert.equal(isTargetModel({ provider: "openai", id: "gpt-4o" }, cfgProviders), true);
+
+			const cfgModels = normalizeConfig({ providers: [], models: ["*"] });
+			assert.equal(isTargetModel({ provider: "anthropic", id: "claude-3-7-sonnet" }, cfgModels), true);
+			assert.equal(isTargetModel({ provider: "openai", id: "gpt-4o" }, cfgModels), true);
+		});
 	});
-});

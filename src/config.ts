@@ -112,6 +112,7 @@ export function isTargetModel(
 	config: ApplyPatchConfig,
 ): boolean {
 	if (!model?.provider || !model.id) return false;
+	if (config.providers.includes("*") || config.models.includes("*")) return true;
 	if (config.models.length === 0 && config.providers.length === 0) return false;
 
 	const full = `${model.provider}/${model.id}`;
