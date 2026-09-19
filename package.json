@@ -4,6 +4,13 @@
   "description": "Universal, configurable Codex-style apply_patch extension for Pi \u2014 works seamlessly with Claude, Gemini, DeepSeek, GPT, and custom API relays.",
   "type": "module",
   "main": "./src/index.ts",
+  "files": [
+    "src",
+    "README.md",
+    "README_ZH.md",
+    "LICENSE",
+    "AGENTS.md"
+  ],
   "keywords": [
     "pi",
     "pi-coding-agent",
@@ -29,7 +36,8 @@
     ]
   },
   "scripts": {
-    "test": "node --test --test-reporter=spec test/patch.test.ts test/progress.test.ts test/extra.test.ts test/config.test.ts test/units.test.ts"
+    "test": "node --test --test-reporter=spec test/patch.test.ts test/progress.test.ts test/extra.test.ts test/config.test.ts test/units.test.ts test/gate.test.ts",
+    "prepublishOnly": "npm test"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.80.0",
