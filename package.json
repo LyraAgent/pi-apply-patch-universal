@@ -1,6 +1,6 @@
 {
   "name": "pi-apply-patch-universal",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Universal, configurable Codex-style apply_patch extension for Pi \u2014 works seamlessly with Claude, Gemini, DeepSeek, GPT, and custom API relays.",
   "type": "module",
   "main": "./src/index.ts",
