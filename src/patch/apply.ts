@@ -258,7 +258,12 @@ export async function applyPatch(
 				absoluteMoveTo !== absolutePath &&
 				pathEntryExists(absoluteMoveTo)
 			) {
-				throw new Error(`Move target already exists: ${action.moveTo}`);
+				if (options.moveOnExisting !== "overwrite") {
+					throw new Error(`Move target already exists: ${action.moveTo}`);
+				}
+				// Codex overwrites existing move destinations. Directories still fail
+				// naturally (EISDIR) rather than being recursively removed.
+				await rm(absoluteMoveTo, { force: true });
 			}
 
 			const raw = await readFile(absolutePath, "utf8");

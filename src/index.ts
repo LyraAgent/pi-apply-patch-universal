@@ -8,6 +8,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { isTargetModel, loadConfig } from "./config.ts";
+import { APPLY_PATCH_CONSTRAINED_SAMPLING } from "./grammar.ts";
+import { assessToolCall } from "./gate.ts";
 import { applyPatch, prepareApplyPatchArguments } from "./patch/index.ts";
 import { renderApplyPatchCall, renderApplyPatchResult } from "./render.ts";
 import { openApplyPatchSettings } from "./settings-ui.ts";
@@ -29,10 +31,10 @@ const APPLY_PATCH_DESCRIPTION = [
 	"- Wrap all operations in '*** Begin Patch' and '*** End Patch' standing alone on their own line without '+' or '-' prefixes.",
 	"- Add: '*** Add File: <path>'; prefix every content line, including blank lines, with '+'. By default an existing file at that path is overwritten; configure addFileOnExisting to make it an error instead.",
 	"- Update: '*** Update File: <path>'; use one or more '@@' hunks with space-prefixed context, '-' removals, and '+' additions. '@@ <existing line>' narrows the hunk search to after that line; standard '@@ -L,N +L,N @@' ranges are also accepted.",
-	"- Move: place '*** Move to: <new path>' immediately after an Update File header.",
+	"- Move: place '*** Move to: <new path>' immediately after an Update File header. Move destinations must not already exist unless moveOnExisting is set to 'overwrite'.",
 	"- Delete: '*** Delete File: <path>' with no body.",
 	"- Optional '*** End of File' makes the preceding hunk prefer the file end.",
-	"- Do not target one path more than once. Move destinations must not already exist.",
+	"- Do not target one path more than once.",
 	"- For large multi-file changes, split work into focused, smaller patches to prevent generation timeouts.",
 	"",
 	"Example:",
@@ -53,6 +55,8 @@ const APPLY_PATCH_PROMPT_GUIDELINES = [
 	"Use '@@ <unique context line>' or line-number headers (e.g. '@@ -L,N +L,N @@') to locate hunks instead of repeating extensive surrounding context.",
 	"For extensive multi-file changes or large refactorings, emit separate focused patches per file or logical change to prevent generation timeouts.",
 	"Ensure '*** Begin Patch' and '*** End Patch' are standalone on their own lines without diff prefixes.",
+	"Do not waste tokens re-reading files after calling apply_patch on them: the tool call fails loudly if it did not work.",
+	"Only use the exact tool name 'apply_patch'. Never try 'applypatch' or 'apply-patch', and never route patches through the shell.",
 ];
 
 function arraysEqual(a: string[], b: string[]): boolean {
@@ -107,6 +111,7 @@ export default function piApplyPatch(pi: ExtensionAPI) {
 		promptSnippet: "apply_patch: Apply atomic Codex-style unified patches across files",
 		promptGuidelines: APPLY_PATCH_PROMPT_GUIDELINES,
 		parameters: APPLY_PATCH_PARAMS,
+		constrainedSampling: APPLY_PATCH_CONSTRAINED_SAMPLING,
 		executionMode: "sequential",
 		prepareArguments: prepareApplyPatchArguments,
 		renderCall: renderApplyPatchCall,
@@ -130,6 +135,7 @@ export default function piApplyPatch(pi: ExtensionAPI) {
 					cwd: ctx.cwd,
 					allowAbsolutePaths: config.allowAbsolutePaths,
 					addFileOnExisting: config.addFileOnExisting,
+					moveOnExisting: config.moveOnExisting,
 					signal,
 				},
 				(progress) => {
@@ -174,24 +180,6 @@ export default function piApplyPatch(pi: ExtensionAPI) {
 
 	pi.on("tool_call", (event, ctx) => {
 		const config = loadConfig();
-		const active = isTargetModel(ctx.model, config);
-
-		if (event.toolName === "apply_patch" && !active) {
-			return {
-				block: true,
-				reason: "apply_patch only enabled for configured providers/models. Run /apply-patch.",
-			};
-		}
-
-		if (
-			active &&
-			config.disableNativeEdit &&
-			(event.toolName === "edit" || event.toolName === "write")
-		) {
-			return {
-				block: true,
-				reason: "Native edit/write disabled on this model. Use apply_patch.",
-			};
-		}
+		return assessToolCall(event, isTargetModel(ctx.model, config), config);
 	});
 }

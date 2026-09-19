@@ -48,12 +48,35 @@ function formatCounterLine(
 	return line;
 }
 
+/**
+ * Memoized streaming progress: parse the partial input only when it actually
+ * grew for this tool call. Mirrors Codex's throttled argument-diff events
+ * (500ms buffer) without touching the TUI layer.
+ */
+const progressCache = new Map<
+	string,
+	{ len: number; progress: ReturnType<typeof parseApplyPatchInputProgress> }
+>();
+
+function getInputProgress(toolCallId: string, input: string) {
+	const cached = progressCache.get(toolCallId);
+	if (cached && cached.len === input.length) return cached.progress;
+	const progress = parseApplyPatchInputProgress(input);
+	if (progressCache.size > 16) progressCache.clear();
+	progressCache.set(toolCallId, { len: input.length, progress });
+	return progress;
+}
+
 /** Streaming call preview: file counters parsed from the partial input. */
-export function renderApplyPatchCall(args: unknown, theme: ThemeLike): Text {
+export function renderApplyPatchCall(
+	args: unknown,
+	theme: ThemeLike,
+	context?: { toolCallId?: string },
+): Text {
 	// Streaming args may not be schema-shaped yet (or may use a sibling key
 	// like `patch`); normalize defensively for display only.
 	const input = prepareApplyPatchArguments(args).input;
-	const progress = parseApplyPatchInputProgress(input);
+	const progress = getInputProgress(context?.toolCallId ?? "_", input);
 
 	let text = theme.fg("toolTitle", theme.bold("apply_patch"));
 	if (progress.totalOperations > 0) {

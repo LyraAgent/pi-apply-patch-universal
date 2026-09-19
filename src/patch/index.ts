@@ -20,6 +20,7 @@ export type {
 	ApplyPatchProgress,
 	ApplyPatchProgressFile,
 	ApplyPatchResult,
+	MoveOnExisting,
 	PatchAction,
 	PatchActionKind,
 	PatchHunk,

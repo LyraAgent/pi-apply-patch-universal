@@ -49,7 +49,8 @@ Settings are persisted in `~/.pi/agent/pi-apply-patch.json`. You can also create
   "models": ["anthropic/claude-3-7-sonnet"],
   "disableNativeEdit": true,
   "allowAbsolutePaths": false,
-  "addFileOnExisting": "overwrite"
+  "addFileOnExisting": "overwrite",
+  "moveOnExisting": "error"
 }
 ```
 
@@ -62,6 +63,7 @@ Settings are persisted in `~/.pi/agent/pi-apply-patch.json`. You can also create
 | `disableNativeEdit` | `boolean` | `true` | **Tool exclusivity policy**. When `true`, hides and blocks built-in `edit` and `write` tools whenever `apply_patch` is active, compelling the LLM to use token-efficient diff patches and avoiding accidental full-file rewrites. Switching to non-target models automatically restores native tools. Set to `false` to keep all tools available concurrently. |
 | `allowAbsolutePaths` | `boolean` | `false` | **Path traversal sandbox**. When `false` (recommended), strictly restricts all patch operations within the current working directory (`cwd`) to prevent accidental edits outside your project root. Set to `true` only if you explicitly need cross-directory patch operations. |
 | `addFileOnExisting` | `"overwrite" \| "error"` | `"overwrite"` | **Add File collision policy**. `"overwrite"` lets `*** Add File:` replace a file that already exists (common when a previous run left a half-written file behind); the resulting diff shows the replaced lines and rollback restores the original content if a later action in the same patch fails. `"error"` restores the strict Codex behavior and fails with guidance to use `*** Update File:` or `*** Delete File:` instead. |
+| `moveOnExisting` | `"error" \| "overwrite"` | `"error"` | **Move destination collision policy**. `"error"` refuses a `*** Move to:` whose destination already exists. `"overwrite"` replaces the destination file, matching upstream Codex semantics; directories still fail rather than being recursively removed. |
 
 #### Activation Logic
 - A model is **active** if it matches any entry in `models` **OR** its provider is in `providers`.

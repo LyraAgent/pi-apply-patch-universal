@@ -101,6 +101,7 @@ export async function openApplyPatchSettings(
 			`disableNativeEdit   ${mark(config.disableNativeEdit)}  hide edit/write when active`,
 			`allowAbsolutePaths  ${mark(config.allowAbsolutePaths)}  allow paths outside cwd`,
 			`addFileOnExisting   ${config.addFileOnExisting}  Add File on an existing path`,
+			`moveOnExisting      ${config.moveOnExisting}  Move to an existing destination`,
 			"Show config path / summary",
 			"Clear all targets",
 			"Done",
@@ -134,6 +135,15 @@ export async function openApplyPatchSettings(
 			config = {
 				...config,
 				addFileOnExisting: config.addFileOnExisting === "overwrite" ? "error" : "overwrite",
+			};
+			saveConfig(config);
+			onSaved?.(config);
+			continue;
+		}
+		if (pick.startsWith("moveOnExisting")) {
+			config = {
+				...config,
+				moveOnExisting: config.moveOnExisting === "overwrite" ? "error" : "overwrite",
 			};
 			saveConfig(config);
 			onSaved?.(config);

@@ -1024,6 +1024,28 @@ describe("line-number drift and comment tolerance", () => {
 	});
 
 	describe("cancellation, truncation & diagnostics resilience", () => {
+	it("overwrites an existing Move target when moveOnExisting is set", async () => {
+		const cwd = await makeTempDir();
+		await writeFile(path.join(cwd, "origin.txt"), "fresh content\n", "utf8");
+		await writeFile(path.join(cwd, "dest.txt"), "stale content\n", "utf8");
+
+		await applyPatch(
+			[
+				"*** Begin Patch",
+				"*** Update File: origin.txt",
+				"*** Move to: dest.txt",
+				"@@",
+				"-fresh content",
+				"+fresher content",
+				"*** End Patch",
+			].join("\n"),
+			{ cwd, moveOnExisting: "overwrite" },
+		);
+
+		await assert.rejects(() => readFile(path.join(cwd, "origin.txt"), "utf8"));
+		assert.equal(await readFile(path.join(cwd, "dest.txt"), "utf8"), "fresher content\n");
+	});
+
 		it("aborts mid-apply and rolls back files that had already been modified", async () => {
 			const cwd = await makeTempDir();
 			await writeFile(path.join(cwd, "a.txt"), "original a\n", "utf8");

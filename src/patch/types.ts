@@ -22,10 +22,18 @@ export interface PatchAction {
  */
 export type AddFileOnExisting = "overwrite" | "error";
 
+/**
+ * What to do when '*** Move to:' targets a path that already exists on disk.
+ * - "error": refuse (default; the tool description promises this to models).
+ * - "overwrite": replace the destination, matching Codex semantics.
+ */
+export type MoveOnExisting = "error" | "overwrite";
+
 export interface ApplyPatchOptions {
 	cwd: string;
 	allowAbsolutePaths?: boolean;
 	addFileOnExisting?: AddFileOnExisting;
+	moveOnExisting?: MoveOnExisting;
 	signal?: AbortSignal;
 }
 

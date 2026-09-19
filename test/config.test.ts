@@ -10,6 +10,15 @@ describe("config & model matching", () => {
 		assert.equal(cfg.disableNativeEdit, true);
 		assert.equal(cfg.allowAbsolutePaths, false);
 		assert.equal(cfg.addFileOnExisting, "overwrite");
+		assert.equal(cfg.moveOnExisting, "error");
+	});
+
+	it("accepts only known moveOnExisting values", () => {
+		assert.equal(normalizeConfig({ moveOnExisting: "overwrite" }).moveOnExisting, "overwrite");
+		assert.equal(
+			normalizeConfig({ moveOnExisting: "nonsense" as never }).moveOnExisting,
+			"error",
+		);
 	});
 
 	it("accepts only known addFileOnExisting values", () => {

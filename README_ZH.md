@@ -49,7 +49,8 @@ pi install git:github.com/LyraAgent/pi-apply-patch-universal
   "models": ["anthropic/claude-3-7-sonnet"],
   "disableNativeEdit": true,
   "allowAbsolutePaths": false,
-  "addFileOnExisting": "overwrite"
+  "addFileOnExisting": "overwrite",
+  "moveOnExisting": "error"
 }
 ```
 
@@ -62,6 +63,7 @@ pi install git:github.com/LyraAgent/pi-apply-patch-universal
 | `disableNativeEdit` | `boolean` | `true` | **原生工具智能屏蔽与保护**。为 `true` 时，在当前模型激活 `apply_patch` 期间，自动隐藏并拦截原生的 `edit` 和 `write` 工具，强迫大模型统一使用极省 Token 的局部增量 Diff，彻底杜绝模型偷懒全文件重写；切回未配置模型时自动无缝还原。设为 `false` 则三者共存。 |
 | `allowAbsolutePaths` | `boolean` | `false` | **工作区路径沙箱防护**。为 `false`（推荐）时，所有补丁操作严格限制在当前工作区目录（`cwd`）内部，防止大模型因相对路径逃逸或绝对路径误改系统敏感文件。仅在确需跨目录修改项目外文件时设为 `true`。 |
 | `addFileOnExisting` | `"overwrite" \| "error"` | `"overwrite"` | **新增文件冲突策略**。为 `"overwrite"` 时，`*** Add File:` 允许覆盖已存在的同名文件（常见于上一次运行留下的半截文件）；覆盖会在 diff 中如实展示被替换的行，且同一补丁中后续操作失败时会回滚还原原始内容。设为 `"error"` 则恢复 Codex 严格行为，报错并提示改用 `*** Update File:` 或 `*** Delete File:`。 |
+| `moveOnExisting` | `"error" \| "overwrite"` | `"error"` | **Move 目标冲突策略**。`"error"` 拒绝移动到已存在的目标路径；`"overwrite"` 覆盖目标文件（对齐 Codex 官方语义），目录目标仍会报错而不会被递归删除。 |
 
 #### 匹配规则
 - **激活条件（或关系）**：当前模型的 Provider 命中 `providers` 列表，**或** 模型 ID 命中 `models` 列表。
