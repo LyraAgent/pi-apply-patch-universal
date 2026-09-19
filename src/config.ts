@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { AddFileOnExisting } from "./patch.js";
+import type { AddFileOnExisting } from "./patch.ts";
 
 export type ApplyPatchConfig = {
 	/** Enable for these provider ids (e.g. "aio"). */

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import os from "node:os";
 import path from "node:path";
 import test, { afterEach, describe, it } from "node:test";
-import { applyPatch } from "../src/patch.ts";
+import { applyPatch } from "../src/patch/index.ts";
 
 const tempDirs: string[] = [];
 

@@ -9,7 +9,7 @@ import {
 	generateNumberedDiff,
 	parseApplyPatch,
 	prepareApplyPatchArguments,
-} from "../src/patch.ts";
+} from "../src/patch/index.ts";
 
 const tempDirs: string[] = [];
 

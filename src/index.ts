@@ -6,19 +6,11 @@
  * - Off match: hide apply_patch, restore edit/write if this extension removed them
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { renderDiff } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { isTargetModel, loadConfig } from "./config.js";
-import {
-	applyPatch,
-	prepareApplyPatchArguments,
-	type ApplyPatchFileDiff,
-	type ApplyPatchProgress,
-	type ApplyPatchResult,
-} from "./patch.js";
-import { parseApplyPatchInputProgress } from "./progress.js";
-import { openApplyPatchSettings } from "./settings-ui.js";
+import { isTargetModel, loadConfig } from "./config.ts";
+import { applyPatch, prepareApplyPatchArguments } from "./patch/index.ts";
+import { renderApplyPatchCall, renderApplyPatchResult } from "./render.ts";
+import { openApplyPatchSettings } from "./settings-ui.ts";
 
 const NATIVE_EDIT_TOOLS = ["edit", "write"] as const;
 
@@ -29,47 +21,39 @@ const APPLY_PATCH_PARAMS = Type.Object({
 	}),
 });
 
-interface ThemeLike {
-	fg(color: string, text: string): string;
-	bold(text: string): string;
-}
+const APPLY_PATCH_DESCRIPTION = [
+	"Apply one atomic Codex-style patch across multiple files. Paths are relative to the current working directory unless absolute paths are enabled.",
+	"",
+	"Key rules:",
+	"- Keep context minimal: include only 2-3 lines of unchanged context around changes. Do not quote large blocks of unchanged code.",
+	"- Wrap all operations in '*** Begin Patch' and '*** End Patch' standing alone on their own line without '+' or '-' prefixes.",
+	"- Add: '*** Add File: <path>'; prefix every content line, including blank lines, with '+'. By default an existing file at that path is overwritten; configure addFileOnExisting to make it an error instead.",
+	"- Update: '*** Update File: <path>'; use one or more '@@' hunks with space-prefixed context, '-' removals, and '+' additions. '@@ <existing line>' narrows the hunk search to after that line; standard '@@ -L,N +L,N @@' ranges are also accepted.",
+	"- Move: place '*** Move to: <new path>' immediately after an Update File header.",
+	"- Delete: '*** Delete File: <path>' with no body.",
+	"- Optional '*** End of File' makes the preceding hunk prefer the file end.",
+	"- Do not target one path more than once. Move destinations must not already exist.",
+	"- For large multi-file changes, split work into focused, smaller patches to prevent generation timeouts.",
+	"",
+	"Example:",
+	"*** Begin Patch",
+	"*** Add File: src/new.py",
+	"+def hello():",
+	"+    print('hello')",
+	"*** Update File: src/main.py",
+	"@@ def run():",
+	"-    old()",
+	"+    hello()",
+	"*** Delete File: obsolete.py",
+	"*** End Patch",
+].join("\n");
 
-interface ApplyPatchRenderFile {
-	path: string;
-	moveTo?: string;
-	operation: "add" | "delete" | "update";
-	added: number;
-	removed: number;
-	done?: boolean;
-}
-
-function operationCode(operation: "add" | "delete" | "update"): "A" | "D" | "U" {
-	if (operation === "add") return "A";
-	if (operation === "delete") return "D";
-	return "U";
-}
-
-function formatTarget(file: Pick<ApplyPatchRenderFile, "path" | "moveTo">): string {
-	return file.moveTo ? `${file.path} -> ${file.moveTo}` : file.path;
-}
-
-function formatCounterLine(
-	theme: ThemeLike,
-	file: ApplyPatchRenderFile,
-	options?: { currentFile?: string; showDone?: boolean; includePath?: boolean },
-): string {
-	const includePath = options?.includePath ?? true;
-	let line = `${theme.fg("toolDiffAdded", `+${file.added}`)} ${theme.fg("toolDiffRemoved", `-${file.removed}`)} ${theme.fg("warning", operationCode(file.operation))}`;
-	if (includePath) {
-		line += ` ${theme.fg("accent", formatTarget(file))}`;
-	}
-	if (options?.showDone && file.done) {
-		line += theme.fg("muted", " ✓");
-	} else if (options?.currentFile && options.currentFile === file.path) {
-		line += theme.fg("warning", " ← applying");
-	}
-	return line;
-}
+const APPLY_PATCH_PROMPT_GUIDELINES = [
+	"When using apply_patch, keep context hunks minimal: include only 2-3 lines of unchanged context before and after changes. Avoid quoting large unchanged code blocks to prevent stream timeouts.",
+	"Use '@@ <unique context line>' or line-number headers (e.g. '@@ -L,N +L,N @@') to locate hunks instead of repeating extensive surrounding context.",
+	"For extensive multi-file changes or large refactorings, emit separate focused patches per file or logical change to prevent generation timeouts.",
+	"Ensure '*** Begin Patch' and '*** End Patch' are standalone on their own lines without diff prefixes.",
+];
 
 function arraysEqual(a: string[], b: string[]): boolean {
 	if (a.length !== b.length) return false;
@@ -119,80 +103,14 @@ export default function piApplyPatch(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "apply_patch",
 		label: "Apply Patch",
-		description:
-			"Apply one atomic Codex-style patch across multiple files. Paths are relative to the current working directory unless absolute paths are enabled.\n\nKey rules:\n- Keep context minimal: include only 2-3 lines of unchanged context around changes. Do not quote large blocks of unchanged code.\n- Wrap all operations in '*** Begin Patch' and '*** End Patch' standing alone on their own line without '+' or '-' prefixes.\n- Add: '*** Add File: <path>'; prefix every content line, including blank lines, with '+'. By default an existing file at that path is overwritten; configure addFileOnExisting to make it an error instead.\n- Update: '*** Update File: <path>'; use one or more '@@' hunks with space-prefixed context, '-' removals, and '+' additions. '@@ <existing line>' narrows the hunk search to after that line; standard '@@ -L,N +L,N @@' ranges are also accepted.\n- Move: place '*** Move to: <new path>' immediately after an Update File header.\n- Delete: '*** Delete File: <path>' with no body.\n- Optional '*** End of File' makes the preceding hunk prefer the file end.\n- Do not target one path more than once. Move destinations must not already exist.\n- For large multi-file changes, split work into focused, smaller patches to prevent generation timeouts.\n\nExample:\n*** Begin Patch\n*** Add File: src/new.py\n+def hello():\n+    print('hello')\n*** Update File: src/main.py\n@@ def run():\n-    old()\n+    hello()\n*** Delete File: obsolete.py\n*** End Patch",
+		description: APPLY_PATCH_DESCRIPTION,
 		promptSnippet: "apply_patch: Apply atomic Codex-style unified patches across files",
-		promptGuidelines: [
-			"When using apply_patch, keep context hunks minimal: include only 2-3 lines of unchanged context before and after changes. Avoid quoting large unchanged code blocks to prevent stream timeouts.",
-			"Use '@@ <unique context line>' or line-number headers (e.g. '@@ -L,N +L,N @@') to locate hunks instead of repeating extensive surrounding context.",
-			"For extensive multi-file changes or large refactorings, emit separate focused patches per file or logical change to prevent generation timeouts.",
-			"Ensure '*** Begin Patch' and '*** End Patch' are standalone on their own lines without diff prefixes.",
-		],
+		promptGuidelines: APPLY_PATCH_PROMPT_GUIDELINES,
 		parameters: APPLY_PATCH_PARAMS,
 		executionMode: "sequential",
 		prepareArguments: prepareApplyPatchArguments,
-		renderCall(args, theme) {
-			// Streaming args may not be schema-shaped yet (or may use a sibling key
-			// like `patch`); normalize defensively for display only.
-			const input = prepareApplyPatchArguments(args).input;
-			const progress = parseApplyPatchInputProgress(input);
-
-			let text = theme.fg("toolTitle", theme.bold("apply_patch"));
-			if (progress.totalOperations > 0) {
-				text += theme.fg(
-					"muted",
-					` (${progress.totalOperations} file${progress.totalOperations === 1 ? "" : "s"})`,
-				);
-			}
-			if (progress.files.length > 0) {
-				text += `\n${progress.files.map((file) => formatCounterLine(theme, file, { includePath: true })).join("\n")}`;
-			}
-
-			return new Text(text, 0, 0);
-		},
-		renderResult(result, { expanded, isPartial }, theme) {
-			const details = result.details as ApplyPatchResult | ApplyPatchProgress | undefined;
-			const textBlock = result.content.find((block) => block.type === "text");
-			const baseText = textBlock?.type === "text" ? textBlock.text : "";
-
-			if (isPartial) {
-				if (expanded && details?.diff && details.diff.length > 0) {
-					return new Text(renderDiff(details.diff), 0, 0);
-				}
-
-				if (!expanded && details?.stage === "apply_progress" && Array.isArray(details.files)) {
-					if (details.files.length > 0) {
-						const count = details.totalOperations ?? details.files.length;
-						const title = `${theme.fg("toolTitle", theme.bold("apply_patch"))}${theme.fg("muted", ` (${count} file${count === 1 ? "" : "s"})`)}`;
-						const lines = details.files
-							.map((file) => formatCounterLine(theme, file, { includePath: true }))
-							.join("\n");
-						return new Text(`${title}\n${lines}`, 0, 0);
-					}
-					const total = details.totalOperations ?? details.files.length;
-					const done = details.completedOperations ?? 0;
-					return new Text(theme.fg("warning", `Applying patch ${done}/${total}...`), 0, 0);
-				}
-
-				return new Text(theme.fg("warning", baseText || "Applying patch..."), 0, 0);
-			}
-
-			if (details?.diff && details.diff.length > 0) {
-				if (expanded) {
-					return new Text(renderDiff(details.diff), 0, 0);
-				}
-				if (Array.isArray(details.fileDiffs) && details.fileDiffs.length > 0) {
-					const count = details.fileDiffs.length;
-					const title = `${theme.fg("toolTitle", theme.bold("apply_patch"))}${theme.fg("muted", ` (${count} file${count === 1 ? "" : "s"})`)}`;
-					const lines = details.fileDiffs
-						.map((file) => formatCounterLine(theme, file, { includePath: true }))
-						.join("\n");
-					return new Text(`${title}\n${lines}`, 0, 0);
-				}
-			}
-
-			return new Text(baseText, 0, 0);
-		},
+		renderCall: renderApplyPatchCall,
+		renderResult: renderApplyPatchResult,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const config = loadConfig();
 			if (!isTargetModel(ctx.model, config)) {

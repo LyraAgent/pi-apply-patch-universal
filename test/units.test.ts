@@ -14,7 +14,7 @@ import {
 	parseHunkHeaderLineNumber,
 	prepareApplyPatchArguments,
 	restoreLineEndings,
-} from "../src/patch.ts";
+} from "../src/patch/index.ts";
 import { DEFAULT_CONFIG, formatConfigSummary, listProvidersFromCatalog } from "../src/config.ts";
 
 const fakeHomes: string[] = [];

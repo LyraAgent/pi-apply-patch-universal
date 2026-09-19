@@ -6,7 +6,7 @@ import {
 	loadConfig,
 	loadModelsCatalog,
 	saveConfig,
-} from "./config.js";
+} from "./config.ts";
 
 function mark(on: boolean): string {
 	return on ? "[x]" : "[ ]";
