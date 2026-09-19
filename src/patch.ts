@@ -32,6 +32,7 @@ export interface ApplyPatchOptions {
 	cwd: string;
 	allowAbsolutePaths?: boolean;
 	addFileOnExisting?: AddFileOnExisting;
+	signal?: AbortSignal;
 }
 
 export interface ApplyPatchFileDiff {
@@ -69,6 +70,23 @@ export interface ApplyPatchResult {
 	filesChanged: number;
 	fileDiffs: ApplyPatchFileDiff[];
 	diff: string;
+}
+
+/**
+ * Normalizes tool call arguments across different LLM providers/models.
+ * Supports { input }, { patch }, { diff }, { content }, or raw string.
+ */
+export function prepareApplyPatchArguments(args: unknown): { input: string } {
+	if (typeof args === "string") {
+		return { input: args };
+	}
+	if (typeof args === "object" && args !== null) {
+		const record = args as Record<string, unknown>;
+		const input =
+			record.input ?? record.patch ?? record.diff ?? record.content ?? "";
+		return { input: typeof input === "string" ? input : String(input) };
+	}
+	return { input: "" };
 }
 
 const BEGIN_MARKER = "*** Begin Patch";
@@ -276,7 +294,17 @@ export function parseApplyPatch(input: string): { actions: PatchAction[] } {
 		}
 		if (current.lines.length > 0) action.hunks.push(current);
 		if (action.kind !== "delete" && action.hunks.length === 0 && !action.moveTo) {
-			throw new Error(`Patch action has no hunks: ${action.path}`);
+			// The end marker has not been consumed yet (the inner loop only peeked at
+			// it), so sawEnd is still false here. Distinguish by position: a terminator
+			// line still ahead means the patch text itself is complete and the action
+			// is simply malformed; running off the end means the stream was cut.
+			if (index < lines.length) {
+				throw new Error(`Patch action has no hunks: ${action.path}`);
+			}
+			throw new Error(
+				`Patch appears truncated or incomplete for ${action.path} (stream ended before '*** End Patch'). ` +
+					"If the output hit a token limit or timed out, split the change into smaller patches with 2-3 lines of context.",
+			);
 		}
 		actions.push(action);
 	}
@@ -487,7 +515,32 @@ function buildCandidateHunkLineSets(rawLines: string[]): string[][] {
 		}
 	}
 
-	return candidates;
+	// Codex-style EOF tolerance: models routinely end an update hunk with a blank
+	// context line that stands for the file's final newline, which the target file
+	// may not actually have (no trailing newline). Retry each candidate with that
+	// line dropped from both sides. Only blank *context* lines are stripped — a
+	// blank '-' line is a real deletion and must not be silently skipped.
+	const stripped: string[][] = [];
+	for (const cand of candidates) {
+		let lastNonAddIdx = -1;
+		for (let i = cand.length - 1; i >= 0; i--) {
+			if (!cand[i]!.startsWith("+")) {
+				lastNonAddIdx = i;
+				break;
+			}
+		}
+		if (lastNonAddIdx < 0) continue;
+		const line = cand[lastNonAddIdx]!;
+		const marker = line[0];
+		const content = marker === " " || marker === "?" ? line.slice(1) : line;
+		if (content !== "" || marker !== " ") continue;
+		const variant = [...cand.slice(0, lastNonAddIdx), ...cand.slice(lastNonAddIdx + 1)];
+		const duplicate = [...candidates, ...stripped].some(
+			(c) => c.length === variant.length && c.every((l, i) => l === variant[i]),
+		);
+		if (!duplicate) stripped.push(variant);
+	}
+	return [...candidates, ...stripped];
 }
 
 function generateHunkDiagnostic(
@@ -570,7 +623,15 @@ function generateHunkDiagnostic(
 		closestDiagnostic = `Closest match in file (around line ${bestIndex + 1}, similarity ${simPercent}%):\n${actualLinesFormatted.join("\n")}`;
 	}
 
-	return `Patch context not found in ${filePath}\n\nFailed at Hunk #${hunkIndex + 1}${headerInfo}:\nExpected context:\n${expectedFormatted}\n\n${closestDiagnostic}`;
+	const targetLine = hintLine ?? (bestIndex >= 0 ? bestIndex + 1 : undefined);
+	const targetHint = targetLine !== undefined ? ` around line ${targetLine}` : "";
+	const actionableAdvice =
+		`\n\nActionable Advice:\n` +
+		`1. Use 'read' to inspect the actual file content${targetHint}.\n` +
+		`2. Keep context hunks minimal (2-3 lines of context around changes) to avoid drift.\n` +
+		`3. Verify exact indentation, comments, and line endings.`;
+
+	return `Patch context not found in ${filePath}\n\nFailed at Hunk #${hunkIndex + 1}${headerInfo}:\nExpected context:\n${expectedFormatted}\n\n${closestDiagnostic}${actionableAdvice}`;
 }
 
 function findChangeContextEnd(
@@ -706,6 +767,9 @@ function applyHunkWithFuzz(
 	const searchCursor = changeContextEnd ?? cursor;
 
 	for (const candidateLines of candidateLineSets) {
+		// Whether this candidate quotes any existing-file line (context or removal).
+		// Pure-insertion hunks never do; used to gate fuzz-degraded insertions below.
+		const candidateQuotesExistingLines = candidateLines.some((l) => !l.startsWith("+"));
 		for (let fuzz = 0; fuzz <= 2; fuzz++) {
 			let startIdx = 0;
 			let endIdx = candidateLines.length;
@@ -735,6 +799,11 @@ function applyHunkWithFuzz(
 			const subHunkLines = candidateLines.slice(startIdx, endIdx);
 			const { oldChunk } = hunkToChunks(subHunkLines);
 			if (oldChunk.length === 0) {
+				// A pure-insertion remainder produced by fuzz dropping context lines is
+				// not a real insertion: the quoted context failed to locate, and blindly
+				// inserting at the cursor silently relocates the edit. Only hunks that
+				// were pure insertions from the start may take this path.
+				if (candidateQuotesExistingLines) continue;
 				const { newChunk } = hunkToChunks(subHunkLines);
 				const insertionHeader = hunk.header?.match(/-(\d+),0(?:\s|$)/);
 				const hintedIndex = insertionHeader ? Number.parseInt(insertionHeader[1]!, 10) : undefined;
@@ -840,7 +909,6 @@ function applyHunkWithFuzz(
 			}
 		}
 	}
-
 	// Every strict pass failed. Retry with comment/blank-line tolerance, requiring
 	// the anchor alignment to be unique so a paraphrased comment cannot silently
 	// move the edit somewhere else.
@@ -1210,12 +1278,23 @@ export async function applyPatch(
 		});
 	};
 
+	const checkAborted = () => {
+		if (options.signal?.aborted) {
+			const reason = options.signal.reason;
+			const detail =
+				reason instanceof Error ? reason.message : reason ? String(reason) : "operation was aborted";
+			throw new Error(`apply_patch aborted: ${detail}`);
+		}
+	};
+
+	checkAborted();
 	if (parsed.actions.length > 0) {
 		emitProgress(0, 0);
 	}
 
 	try {
 		for (const [opIndex, action] of parsed.actions.entries()) {
+			checkAborted();
 			const progressFile = progressFiles[opIndex]!;
 			await snap(action.path);
 			if (action.moveTo) await snap(action.moveTo);

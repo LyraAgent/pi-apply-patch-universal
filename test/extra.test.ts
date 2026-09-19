@@ -1016,9 +1016,317 @@ describe("line-number drift and comment tolerance", () => {
 			),
 			/would have been skipped/,
 		);
-		assert.equal(
-			await readFile(path.join(cwd, "keep.ts"), "utf8"),
-			["function f() {", "\treturn 1;", "}"].join("\n") + "\n",
-		);
+			assert.equal(
+				await readFile(path.join(cwd, "keep.ts"), "utf8"),
+				["function f() {", "\treturn 1;", "}"].join("\n") + "\n",
+			);
+		});
 	});
-});
+
+	describe("cancellation, truncation & diagnostics resilience", () => {
+		it("aborts mid-apply and rolls back files that had already been modified", async () => {
+			const cwd = await makeTempDir();
+			await writeFile(path.join(cwd, "a.txt"), "original a\n", "utf8");
+			await writeFile(path.join(cwd, "b.txt"), "original b\n", "utf8");
+
+			const controller = new AbortController();
+			await assert.rejects(
+				applyPatch(
+					[
+						"*** Begin Patch",
+						"*** Update File: a.txt",
+						"@@",
+						"-original a",
+						"+updated a",
+						"*** Update File: b.txt",
+						"@@",
+						"-original b",
+						"+updated b",
+						"*** End Patch",
+					].join("\n"),
+					{ cwd, signal: controller.signal },
+					(progress) => {
+						// Abort once the first file has been applied so rollback is exercised.
+						if (progress.completedOperations >= 1) {
+							controller.abort(new Error("user cancelled mid-apply"));
+						}
+					},
+				),
+				/apply_patch aborted: user cancelled mid-apply/,
+			);
+
+			assert.equal(await readFile(path.join(cwd, "a.txt"), "utf8"), "original a\n");
+			assert.equal(await readFile(path.join(cwd, "b.txt"), "utf8"), "original b\n");
+		});
+
+		it("rejects a pre-aborted signal before touching any file", async () => {
+			const cwd = await makeTempDir();
+			await writeFile(path.join(cwd, "a.txt"), "original a\n", "utf8");
+
+			const controller = new AbortController();
+			controller.abort();
+
+			await assert.rejects(
+				applyPatch(
+					[
+						"*** Begin Patch",
+						"*** Update File: a.txt",
+						"@@",
+						"-original a",
+						"+updated a",
+						"*** End Patch",
+					].join("\n"),
+					{ cwd, signal: controller.signal },
+				),
+				/apply_patch aborted/,
+			);
+			assert.equal(await readFile(path.join(cwd, "a.txt"), "utf8"), "original a\n");
+		});
+
+		it("reports 'no hunks' (not truncation) when End Patch is present with an empty action", async () => {
+			const cwd = await makeTempDir();
+			await writeFile(path.join(cwd, "test.ts"), "const x = 1;\n", "utf8");
+
+			await assert.rejects(
+				applyPatch(
+					["*** Begin Patch", "*** Update File: test.ts", "*** End Patch"].join("\n"),
+					{ cwd },
+				),
+				/Patch action has no hunks: test\.ts/,
+			);
+		});
+
+		it("rejects truncated patch with unclosed hunk when End Patch is missing", async () => {
+			const cwd = await makeTempDir();
+			await writeFile(path.join(cwd, "test.ts"), "const x = 1;\n", "utf8");
+
+			await assert.rejects(
+				applyPatch(
+					[
+						"*** Begin Patch",
+						"*** Update File: test.ts",
+						"@@",
+						"-const x = 1;",
+						"+const x = 2;",
+						"*** Update File: truncated.ts",
+						"@@",
+					].join("\n"),
+					{ cwd },
+				),
+				/Patch appears truncated or incomplete/,
+			);
+		});
+
+		it("accepts a move-only update action even when End Patch is omitted", async () => {
+			const cwd = await makeTempDir();
+			await writeFile(path.join(cwd, "origin.ts"), "content\n", "utf8");
+
+			await applyPatch(
+				["*** Begin Patch", "*** Update File: origin.ts", "*** Move to: renamed.ts"].join("\n"),
+				{ cwd },
+			);
+
+			await assert.rejects(() => readFile(path.join(cwd, "origin.ts"), "utf8"));
+			assert.equal(await readFile(path.join(cwd, "renamed.ts"), "utf8"), "content\n");
+		});
+
+		it("tolerates EOF newline mismatch when pattern has trailing empty line", async () => {
+			const cwd = await makeTempDir();
+			// File without trailing newline
+			await writeFile(path.join(cwd, "no_eof_nl.txt"), "line1\nline2", "utf8");
+
+			const patchText = [
+				"*** Begin Patch",
+				"*** Update File: no_eof_nl.txt",
+				"@@",
+				" line1",
+				"-line2",
+				"+line2 modified",
+				" ",
+				"*** End Patch",
+			].join("\n");
+
+			const result = await applyPatch(patchText, { cwd });
+			assert.equal(result.filesChanged, 1);
+			const updated = await readFile(path.join(cwd, "no_eof_nl.txt"), "utf8");
+			assert.equal(updated, "line1\nline2 modified");
+		});
+
+		it("strips a trailing blank context line even when additions follow it", async () => {
+			const cwd = await makeTempDir();
+			await writeFile(path.join(cwd, "tail.txt"), "line1", "utf8");
+
+			await applyPatch(
+				[
+					"*** Begin Patch",
+					"*** Update File: tail.txt",
+					"@@",
+					" line1",
+					" ",
+					"+appended",
+					"*** End Patch",
+				].join("\n"),
+				{ cwd },
+			);
+
+			// The blank context line stood for the missing final newline; the
+			// addition must land after the located context, not at the file top.
+			assert.equal(await readFile(path.join(cwd, "tail.txt"), "utf8"), "line1\nappended");
+		});
+
+		it("rejects instead of silently relocating when quoted context cannot be located", async () => {
+			const cwd = await makeTempDir();
+			await writeFile(path.join(cwd, "relocate.txt"), "alpha\nbeta\n", "utf8");
+
+			await assert.rejects(
+				applyPatch(
+					[
+						"*** Begin Patch",
+						"*** Update File: relocate.txt",
+						"@@",
+						" nonexistent context line",
+						"+added",
+						"*** End Patch",
+					].join("\n"),
+					{ cwd },
+				),
+				/Patch context not found/,
+			);
+			assert.equal(await readFile(path.join(cwd, "relocate.txt"), "utf8"), "alpha\nbeta\n");
+		});
+
+		it("includes actionable advice in hunk failure diagnostic", async () => {
+			const cwd = await makeTempDir();
+			await writeFile(path.join(cwd, "sample.txt"), "alpha\nbeta\ngamma\n", "utf8");
+
+			await assert.rejects(
+				applyPatch(
+					[
+						"*** Begin Patch",
+						"*** Update File: sample.txt",
+						"@@",
+						" completely nonexistent line 1",
+						" completely nonexistent line 2",
+						" completely nonexistent line 3",
+						"-beta",
+						"+beta updated",
+						"*** End Patch",
+					].join("\n"),
+					{ cwd },
+				),
+				/Actionable Advice/,
+			);
+		});
+	});
+
+	describe("input validation & filesystem error paths", () => {
+		it("rejects empty or whitespace-only input", async () => {
+			const cwd = await makeTempDir();
+			await assert.rejects(applyPatch("", { cwd }), /must be a non-empty string/);
+			await assert.rejects(applyPatch("   \n  ", { cwd }), /must be a non-empty string/);
+		});
+
+		it("rejects input without a Begin Patch marker", async () => {
+			const cwd = await makeTempDir();
+			await assert.rejects(
+				applyPatch("*** Update File: a.ts\n@@\n-a\n+b\n*** End Patch", { cwd }),
+				/Patch must start with '\*\*\* Begin Patch'/,
+			);
+		});
+
+		it("rejects update on a nonexistent file with a readable error", async () => {
+			const cwd = await makeTempDir();
+			await assert.rejects(
+				applyPatch(
+					"*** Begin Patch\n*** Update File: missing.ts\n@@\n-a\n+b\n*** End Patch",
+					{ cwd },
+				),
+				/ENOENT|no such file/,
+			);
+		});
+
+		it("rejects delete on a nonexistent file", async () => {
+			const cwd = await makeTempDir();
+			await assert.rejects(
+				applyPatch("*** Begin Patch\n*** Delete File: missing.ts\n*** End Patch", { cwd }),
+				/ENOENT|no such file/,
+			);
+		});
+
+		it("rejects an Add File with no content lines", async () => {
+			const cwd = await makeTempDir();
+			await assert.rejects(
+				applyPatch(
+					"*** Begin Patch\n*** Add File: empty.txt\n*** End Patch",
+					{ cwd },
+				),
+				/Patch action has no hunks: empty\.txt/,
+			);
+		});
+
+		it("move to the same path applies the content update without renaming", async () => {
+			const cwd = await makeTempDir();
+			await writeFile(path.join(cwd, "same.ts"), "old\n", "utf8");
+
+			await applyPatch(
+				[
+					"*** Begin Patch",
+					"*** Update File: same.ts",
+					"*** Move to: same.ts",
+					"@@",
+					"-old",
+					"+new",
+					"*** End Patch",
+				].join("\n"),
+				{ cwd },
+			);
+
+			assert.equal(await readFile(path.join(cwd, "same.ts"), "utf8"), "new\n");
+		});
+
+		it("normalizes lone-CR line endings to LF on update", async () => {
+			const cwd = await makeTempDir();
+			await writeFile(path.join(cwd, "cr.txt"), "alpha\rbeta\rgamma\r", "utf8");
+
+			await applyPatch(
+				[
+					"*** Begin Patch",
+					"*** Update File: cr.txt",
+					"@@",
+					"-beta",
+					"+BETA",
+					"*** End Patch",
+				].join("\n"),
+				{ cwd },
+			);
+
+			// normalizeText converts lone CR to LF and detectLineEnding falls back to LF
+			assert.equal(await readFile(path.join(cwd, "cr.txt"), "utf8"), "alpha\nBETA\ngamma\n");
+		});
+
+		it("emits one progress event per operation in order", async () => {
+			const cwd = await makeTempDir();
+			await writeFile(path.join(cwd, "p1.txt"), "a\n", "utf8");
+			await writeFile(path.join(cwd, "p2.txt"), "b\n", "utf8");
+
+			const events: number[] = [];
+			await applyPatch(
+				[
+					"*** Begin Patch",
+					"*** Update File: p1.txt",
+					"@@",
+					"-a",
+					"+a2",
+					"*** Update File: p2.txt",
+					"@@",
+					"-b",
+					"+b2",
+					"*** End Patch",
+				].join("\n"),
+				{ cwd },
+				(progress) => events.push(progress.completedOperations),
+			);
+
+			assert.deepEqual(events, [0, 1, 2]);
+		});
+	});

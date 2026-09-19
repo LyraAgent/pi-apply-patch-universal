@@ -8,6 +8,7 @@ import {
 	combineFileDiffs,
 	generateNumberedDiff,
 	parseApplyPatch,
+	prepareApplyPatchArguments,
 } from "../src/patch.ts";
 
 const tempDirs: string[] = [];
@@ -84,6 +85,39 @@ describe("parseApplyPatch", () => {
 		assert.equal(parsed.actions[0]?.kind, "add");
 		assert.equal(parsed.actions[1]?.kind, "update");
 		assert.equal(parsed.actions[2]?.kind, "delete");
+	});
+});
+
+describe("prepareApplyPatchArguments", () => {
+	it("accepts string directly as input", () => {
+		const res = prepareApplyPatchArguments("*** Begin Patch\n*** End Patch");
+		assert.deepEqual(res, { input: "*** Begin Patch\n*** End Patch" });
+	});
+
+	it("normalizes { input }", () => {
+		const res = prepareApplyPatchArguments({ input: "patch content" });
+		assert.deepEqual(res, { input: "patch content" });
+	});
+
+	it("normalizes { patch } alias", () => {
+		const res = prepareApplyPatchArguments({ patch: "patch from model" });
+		assert.deepEqual(res, { input: "patch from model" });
+	});
+
+	it("normalizes { diff } alias", () => {
+		const res = prepareApplyPatchArguments({ diff: "diff from model" });
+		assert.deepEqual(res, { input: "diff from model" });
+	});
+
+	it("normalizes { content } alias", () => {
+		const res = prepareApplyPatchArguments({ content: "content from model" });
+		assert.deepEqual(res, { input: "content from model" });
+	});
+
+	it("falls back to empty input for invalid types", () => {
+		assert.deepEqual(prepareApplyPatchArguments(null), { input: "" });
+		assert.deepEqual(prepareApplyPatchArguments(undefined), { input: "" });
+		assert.deepEqual(prepareApplyPatchArguments(123), { input: "" });
 	});
 });
 

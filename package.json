@@ -29,7 +29,7 @@
     ]
   },
   "scripts": {
-    "test": "node --test --test-reporter=spec test/patch.test.ts test/progress.test.ts test/extra.test.ts test/config.test.ts"
+    "test": "node --test --test-reporter=spec test/patch.test.ts test/progress.test.ts test/extra.test.ts test/config.test.ts test/units.test.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.80.0",
