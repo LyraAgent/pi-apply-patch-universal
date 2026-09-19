@@ -8,12 +8,21 @@ Works seamlessly with Claude, Gemini, DeepSeek, GPT, and custom API relays.
 ## Features
 
 - **Universal Model Support**: Compatible with all models in `~/.pi/agent/models.json` (Claude, Gemini, DeepSeek, GPT).
+- **Compact-Patch Steering**: prompt guidelines instruct the model to keep 2-3 lines of context per hunk, anchor with `@@`, and split large refactorings — eliminating the long-generation gateway timeouts at their source.
+- **Grammar-Constrained Sampling**: the official Codex Lark grammar is attached to the tool; providers with OpenAI grammar-tool support decode structurally valid patches, while all other providers are unaffected.
 - **Line-Numbered Colored Diff UI**: Rich TUI rendering powered by Pi's native `renderDiff`, displaying colored unified diffs with exact line numbers and per-file `+X -Y` counters.
-- **Live Streaming Progress**: Real-time counter preview while the model streams patch arguments.
-- **Zero-Error Prompt Guidelines**: Explicit formatting rules and examples prevent syntax retries.
+- **Live Streaming Progress**: Real-time counter preview while the model streams patch arguments, memoized per tool call to stay cheap on long patches.
+- **Cancellation-Safe Atomicity**: `AbortSignal` checkpoints run before and between file operations; cancelling mid-apply rolls every modified file back via snapshots, leaving zero on-disk residue.
+- **Stream-Truncation Detection**: a patch cut off before `*** End Patch` is reported distinctly (with guidance to split smaller) instead of failing with a confusing hunk error.
+- **Per-Line Ending Preservation**: untouched lines keep their exact CRLF/LF/CR terminators — including a missing final newline — so mixed-ending files are never rewritten wholesale; changed lines adopt the file's preferred (first) ending, mirroring Codex's `SourceFile` semantics.
+- **EOF Blank-Context Tolerance**: a trailing blank context line standing in for the file's final newline is retried without it, so trailing additions land in the right place.
+- **No Silent Relocation**: when quoted context cannot be located, the patch fails with a diagnostic instead of quietly inserting the change somewhere else.
+- **Self-Healing Diagnostics**: hunk failures include the closest match with line numbers plus concrete advice, letting the model recover in a single retry.
 - **Interactive TUI Configuration**: Manage active providers and models with `/apply-patch`.
 - **Native Edit Protection**: Automatically hides and blocks native `edit`/`write` tools when active, and restores them when switching away.
-- **Path Sandbox**: Restricts patch operations to the current workspace by default (`allowAbsolutePaths: false`).
+- **Shell Detour Guard**: bash/powershell commands invoking `apply_patch` (heredocs, `applypatch`/`apply-patch` misspellings) are blocked with guidance to use the native tool call.
+- **Resilient Arguments**: `input`/`patch`/`diff`/`content` argument keys — and raw strings — are normalized before validation, absorbing per-provider quirks.
+- **Path Sandbox**: Restricts patch operations to the current workspace by default (`allowAbsolutePaths: false`), including symlink-escape checks.
 - **Forgiving Markers**: Auto-corrects a mis-prefixed `+*** End Patch` so the marker is never written into your file.
 - **Tolerant File Headers**: `*** Update File:` and friends are recognized despite indentation, missing/extra spaces, extra asterisks, backticked paths, or a stray diff prefix — so a later file's hunks are never absorbed into the previous file.
 - **Drift-Corrected Line Hints**: `@@ -L,N @@` hints from later hunks are rebased by the net size change of earlier hunks in the same file, then verified by content, so multi-hunk patches do not drift.
@@ -90,7 +99,9 @@ Settings are persisted in `~/.pi/agent/pi-apply-patch.json`. You can also create
 
 Hunks are located by content, not by trusting line numbers. `@@ -L,N +L,N @@` is treated as a hint: it is rebased by the net line change of earlier hunks in the same file, searched outward from there, and then falls back to a full-file scan. A hunk that only matches after ignoring comment differences is applied only when that alignment is unique in the file; comment lines the patch omitted are preserved, and a `-` line that cannot be found is reported rather than silently skipped.
 
-A patch is atomic: if any operation fails, every earlier operation is rolled back and the error lists which ones were reverted, so you can resend them unchanged and rework only the failing file.
+Line endings are preserved per line: untouched lines keep their exact terminators (including a missing final newline), while changed and inserted lines use the file's preferred (first) ending, and a changed final line always receives a terminator — matching Codex's behavior.
+
+A patch is atomic: if any operation fails, every earlier operation is rolled back and the error lists which ones were reverted, so you can resend them unchanged and rework only the failing file. Cancelling the agent mid-apply is equally safe — snapshots restore everything the patch had already touched.
 
 ## Acknowledgements
 
