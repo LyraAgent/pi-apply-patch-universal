@@ -27,7 +27,15 @@ export type {
 export { prepareApplyPatchArguments } from "./args.ts";
 export { cleanPatchPath, parseApplyPatch, parseHunkHeaderLineNumber } from "./parse.ts";
 export { resolvePatchPath } from "./paths.ts";
-export { detectLineEnding, normalizeText, restoreLineEndings } from "./line-endings.ts";
+export {
+	detectLineEnding,
+	normalizeText,
+	parseSourceLines,
+	rebuildPreservingEndings,
+	restoreLineEndings,
+	type LineEnding,
+	type SourceLines,
+} from "./line-endings.ts";
 export { applyHunksToContent, applyHunksToLines } from "./match.ts";
 export { combineFileDiffs, generateNumberedDiff, operationCode } from "./diff.ts";
 export { applyPatch } from "./apply.ts";

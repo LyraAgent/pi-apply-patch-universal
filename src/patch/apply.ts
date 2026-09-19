@@ -7,8 +7,8 @@ import { existsSync, lstatSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { combineFileDiffs, generateNumberedDiff } from "./diff.ts";
-import { detectLineEnding, normalizeText, restoreLineEndings } from "./line-endings.ts";
-import { applyHunksToContent } from "./match.ts";
+import { normalizeText, parseSourceLines, rebuildPreservingEndings } from "./line-endings.ts";
+import { applyHunksToLines } from "./match.ts";
 import { isMissingPathError, resolvePatchPath } from "./paths.ts";
 import { parseApplyPatch } from "./parse.ts";
 import type {
@@ -264,10 +264,12 @@ export async function applyPatch(
 			const raw = await readFile(absolutePath, "utf8");
 			const bom = raw.startsWith("\uFEFF") ? "\uFEFF" : "";
 			const rawWithoutBom = bom ? raw.slice(1) : raw;
-			const lineEnding = detectLineEnding(rawWithoutBom);
-			const originalNormalized = normalizeText(rawWithoutBom);
-			const contentNormalized = applyHunksToContent(originalNormalized, action.hunks, action.path);
-			const finalDiskContent = bom + restoreLineEndings(contentNormalized, lineEnding);
+			const source = parseSourceLines(rawWithoutBom);
+			const nextLines = applyHunksToLines(source.lines, action.hunks, action.path);
+			const contentNormalized = nextLines.join("\n");
+			const finalDiskContent =
+				bom +
+				rebuildPreservingEndings(source.lines, nextLines, source.endings, source.preferred);
 			await writeFile(absolutePath, finalDiskContent, "utf8");
 			if (absoluteMoveTo !== undefined && absoluteMoveTo !== absolutePath) {
 				await mkdir(dirname(absoluteMoveTo), { recursive: true });
@@ -282,6 +284,7 @@ export async function applyPatch(
 				(sum, h) => sum + h.lines.filter((l) => l.startsWith("-")).length,
 				0,
 			);
+			const originalNormalized = source.lines.join("\n");
 			const diffResult = generateNumberedDiff(originalNormalized, contentNormalized);
 			fileDiffs.push({
 				path: action.path,

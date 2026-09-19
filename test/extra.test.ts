@@ -1149,7 +1149,9 @@ describe("line-number drift and comment tolerance", () => {
 			const result = await applyPatch(patchText, { cwd });
 			assert.equal(result.filesChanged, 1);
 			const updated = await readFile(path.join(cwd, "no_eof_nl.txt"), "utf8");
-			assert.equal(updated, "line1\nline2 modified");
+			// The changed final line receives the preferred terminator (Codex appends
+			// the trailing newline on update).
+			assert.equal(updated, "line1\nline2 modified\n");
 		});
 
 		it("strips a trailing blank context line even when additions follow it", async () => {
@@ -1170,8 +1172,37 @@ describe("line-number drift and comment tolerance", () => {
 			);
 
 			// The blank context line stood for the missing final newline; the
-			// addition must land after the located context, not at the file top.
-			assert.equal(await readFile(path.join(cwd, "tail.txt"), "utf8"), "line1\nappended");
+			// addition lands after the located context and the new final line is
+			// terminated, mirroring Codex.
+			assert.equal(await readFile(path.join(cwd, "tail.txt"), "utf8"), "line1\nappended\n");
+		});
+
+		it("preserves mixed line endings per untouched line (Codex SourceFile semantics)", async () => {
+			const cwd = await makeTempDir();
+			// one CRLF line, a lone-CR line, an LF line, then CRLF
+			await writeFile(path.join(cwd, "mixed.txt"), "one\r\ntwo\rthree\nfour\r\n", "utf8");
+
+			await applyPatch(
+				[
+					"*** Begin Patch",
+					"*** Update File: mixed.txt",
+					"@@",
+					" one",
+					" two",
+					"-three",
+					"+THREE",
+					" four",
+					"*** End Patch",
+				].join("\n"),
+				{ cwd },
+			);
+
+			// Untouched lines keep their exact original terminators; the replaced
+			// line uses the file's first ending (preferred = CRLF).
+			assert.equal(
+				await readFile(path.join(cwd, "mixed.txt"), "utf8"),
+				"one\r\ntwo\rTHREE\r\nfour\r\n",
+			);
 		});
 
 		it("rejects instead of silently relocating when quoted context cannot be located", async () => {
@@ -1284,25 +1315,39 @@ describe("line-number drift and comment tolerance", () => {
 			assert.equal(await readFile(path.join(cwd, "same.ts"), "utf8"), "new\n");
 		});
 
-		it("normalizes lone-CR line endings to LF on update", async () => {
-			const cwd = await makeTempDir();
-			await writeFile(path.join(cwd, "cr.txt"), "alpha\rbeta\rgamma\r", "utf8");
+			it("preserves lone-CR line endings on untouched lines", async () => {
+				const cwd = await makeTempDir();
+				await writeFile(path.join(cwd, "cr.txt"), "alpha\rbeta\rgamma\r", "utf8");
 
-			await applyPatch(
-				[
-					"*** Begin Patch",
-					"*** Update File: cr.txt",
-					"@@",
-					"-beta",
-					"+BETA",
-					"*** End Patch",
-				].join("\n"),
-				{ cwd },
-			);
+				await applyPatch(
+					[
+						"*** Begin Patch",
+						"*** Update File: cr.txt",
+						"@@",
+						"-beta",
+						"+BETA",
+						"*** End Patch",
+					].join("\n"),
+					{ cwd },
+				);
 
-			// normalizeText converts lone CR to LF and detectLineEnding falls back to LF
-			assert.equal(await readFile(path.join(cwd, "cr.txt"), "utf8"), "alpha\nBETA\ngamma\n");
-		});
+				// Per-line preservation keeps CR terminators; the replaced line uses
+				// the file's preferred (first) ending, which is CR here.
+				assert.equal(await readFile(path.join(cwd, "cr.txt"), "utf8"), "alpha\rBETA\rgamma\r");
+			});
+
+			it("keeps a move-only rewrite byte-identical when the file lacks a final newline", async () => {
+				const cwd = await makeTempDir();
+				await writeFile(path.join(cwd, "keep.txt"), "alpha\nbeta", "utf8");
+
+				await applyPatch(
+					["*** Begin Patch", "*** Update File: keep.txt", "*** Move to: moved.txt"].join("\n"),
+					{ cwd },
+				);
+
+				// No content lines changed, so the missing final newline survives
+				assert.equal(await readFile(path.join(cwd, "moved.txt"), "utf8"), "alpha\nbeta");
+			});
 
 		it("emits one progress event per operation in order", async () => {
 			const cwd = await makeTempDir();

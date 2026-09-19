@@ -12,7 +12,9 @@ import {
 	normalizeText,
 	parseApplyPatch,
 	parseHunkHeaderLineNumber,
+	parseSourceLines,
 	prepareApplyPatchArguments,
+	rebuildPreservingEndings,
 	restoreLineEndings,
 } from "../src/patch/index.ts";
 import { DEFAULT_CONFIG, formatConfigSummary, listProvidersFromCatalog } from "../src/config.ts";
@@ -103,6 +105,60 @@ describe("line-ending utilities", () => {
 
 	it("normalizes CRLF and lone CR to LF", () => {
 		assert.equal(normalizeText("a\r\nb\rc\nd"), "a\nb\nc\nd");
+	});
+});
+
+describe("parseSourceLines / rebuildPreservingEndings", () => {
+	it("parses per-line endings and the engine line model", () => {
+		const src = parseSourceLines("one\r\ntwo\rthree\nfour\r\n");
+		assert.deepEqual(src.lines, ["one", "two", "three", "four", ""]);
+		assert.deepEqual(src.endings, ["\r\n", "\r", "\n", "\r\n", null]);
+		assert.equal(src.preferred, "\r\n");
+	});
+
+	it("marks unterminated final lines", () => {
+		const src = parseSourceLines("alpha\nbeta");
+		assert.deepEqual(src.lines, ["alpha", "beta"]);
+		assert.deepEqual(src.endings, ["\n", null]);
+	});
+
+	it("defaults preferred to LF for terminator-less content", () => {
+		const src = parseSourceLines("single");
+		assert.deepEqual(src.lines, ["single"]);
+		assert.deepEqual(src.endings, [null]);
+		assert.equal(src.preferred, "\n");
+	});
+
+	it("returns an empty model for empty content", () => {
+		const src = parseSourceLines("");
+		assert.deepEqual(src.lines, []);
+		assert.deepEqual(src.endings, []);
+	});
+
+	it("keeps untouched endings and uses preferred for changed lines", () => {
+		const src = parseSourceLines("one\r\ntwo\rthree\nfour\r\n");
+		const next = ["one", "two", "THREE", "four", ""];
+		assert.equal(
+			rebuildPreservingEndings(src.lines, next, src.endings, src.preferred),
+			"one\r\ntwo\rTHREE\r\nfour\r\n",
+		);
+	});
+
+	it("promotes an unterminated preserved line when insertions follow it", () => {
+		const src = parseSourceLines("line1");
+		const next = ["line1", "appended"];
+		assert.equal(
+			rebuildPreservingEndings(src.lines, next, src.endings, src.preferred),
+			"line1\nappended\n",
+		);
+	});
+
+	it("keeps an unchanged file byte-identical without a final newline", () => {
+		const src = parseSourceLines("alpha\nbeta");
+		assert.equal(
+			rebuildPreservingEndings(src.lines, [...src.lines], src.endings, src.preferred),
+			"alpha\nbeta",
+		);
 	});
 });
 
